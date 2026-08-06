@@ -3,6 +3,52 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <!--
+    Content-Security-Policy
+    ========================
+    No 'unsafe-inline' in script-src. This works because:
+      1. Every onclick/onchange/onkeydown attribute has been removed in
+         favor of addEventListener + data-* attributes (see "Event Wiring"
+         near the end of the <script> block) — CSP blocks inline event
+         handler attributes outright, there's no way to allow specific
+         ones, so they all had to go.
+      2. The one inline <script>...</script> block that remains (the app
+         logic itself) is allow-listed by its exact SHA-256 hash below,
+         instead of by 'unsafe-inline'. The browser hashes the script's
+         contents at load time and only runs it if the hash matches.
+
+    >>> WHEN YOU EDIT ANYTHING INSIDE <script>...</script>, THE HASH BELOW
+    >>> GOES STALE and the app will fail to load (silently, in the console
+    >>> as a CSP violation) until you regenerate it. Regenerate with:
+    >>>   python3 -c "
+    >>>   import hashlib, base64
+    >>>   lines = open('index.html', encoding='utf-8').readlines()
+    >>>   s = next(i for i,l in enumerate(lines) if l.strip()=='<script>')
+    >>>   e = next(i for i,l in enumerate(lines) if l.strip()=='</script>' and i>s)
+    >>>   body = ''.join(lines[s+1:e])
+    >>>   print('sha256-' + base64.b64encode(hashlib.sha256(body.encode()).digest()).decode())"
+    >>> then paste the output in place of the 'sha256-...' value below.
+    >>> (matches on the LINE '<script>'/'</script>' by itself — not any
+    >>> mention of the word inside this comment — so it always finds the
+    >>> real block even as this comment changes.) An injected/tampered
+    >>> script will have a different hash and simply be refused execution.
+
+    An attacker who finds an XSS bug and manages to inject a NEW <script>
+    tag, an onerror= attribute, or a javascript: URL will have it silently
+    blocked, since none of those match the allow-listed hash or come from
+    an allow-listed host.
+
+    script-src also explicitly allowlists cdnjs and jsdelivr (rather than
+    leaving them out) so that if a library is added later, it can ONLY
+    come from these two CDNs and nothing else — see the SRI note near
+    </body> for how to pin such a script with its own integrity hash.
+
+    style-src keeps 'unsafe-inline' — the app still uses inline <style>
+    and style="..." attributes extensively (69+ instances), and CSS alone
+    can't execute JavaScript, so this is a much lower-risk exception than
+    script-src ever was.
+  -->
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self' 'sha256-6hXizDTlAmq/DTYx+sDbeQYdJeLBd6wvXnepOZIBTac=' https://cdnjs.cloudflare.com https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline'; img-src 'self'; font-src 'self'; connect-src 'self'; worker-src 'self'; manifest-src 'self'; base-uri 'none'; form-action 'self'; object-src 'none'">
   <title>Tax Record &amp; Income Tracker</title>
   <link rel="manifest" href="manifest.json">
   <meta name="theme-color" content="#2563eb">
@@ -192,22 +238,22 @@
       <p>Set a passcode to encrypt and protect your tax records on this device. This passcode is never stored — if you forget it, your encrypted records cannot be recovered.</p>
       <div class="form-group">
         <label for="setupPasscode">New Passcode (min. 6 characters)</label>
-        <input type="password" id="setupPasscode" placeholder="Choose a passcode" onkeydown="if(event.key==='Enter') document.getElementById('setupPasscodeConfirm').focus()">
+        <input type="password" id="setupPasscode" placeholder="Choose a passcode">
       </div>
       <div class="form-group">
         <label for="setupPasscodeConfirm">Confirm Passcode</label>
-        <input type="password" id="setupPasscodeConfirm" placeholder="Re-enter passcode" onkeydown="if(event.key==='Enter') handleSetupPasscode()">
+        <input type="password" id="setupPasscodeConfirm" placeholder="Re-enter passcode">
       </div>
-      <button class="btn" style="width: 100%; justify-content: center;" onclick="handleSetupPasscode()">Set Passcode &amp; Continue</button>
+      <button class="btn" style="width: 100%; justify-content: center;" id="setupPasscodeBtn">Set Passcode &amp; Continue</button>
     </div>
 
     <div id="lockUnlockView" style="display: none;">
       <p>Enter your passcode to unlock your records.</p>
       <div class="form-group">
         <label for="unlockPasscode">Passcode</label>
-        <input type="password" id="unlockPasscode" placeholder="Passcode" onkeydown="if(event.key==='Enter') handleUnlock()">
+        <input type="password" id="unlockPasscode" placeholder="Passcode">
       </div>
-      <button class="btn" style="width: 100%; justify-content: center;" onclick="handleUnlock()">Unlock</button>
+      <button class="btn" style="width: 100%; justify-content: center;" id="unlockBtn">Unlock</button>
     </div>
 
     <div id="lockError" class="lock-error" style="display: none;"></div>
@@ -225,25 +271,25 @@
       <p class="subtitle">Malaysia (LHDN, RM) &amp; Singapore (IRAS, S$) tax records</p>
     </div>
     <div class="action-buttons no-print">
-      <button class="btn btn-secondary" onclick="openExportModal()">📥 Export JSON</button>
-      <button class="btn btn-secondary" onclick="document.getElementById('importFileInput').click()">📤 Import JSON</button>
-      <input type="file" id="importFileInput" accept=".json" style="display: none;" onchange="importJSON(event)">
-      <button class="btn btn-secondary" onclick="openChangePasscodeModal()">🔑 Change Passcode</button>
-      <button class="btn btn-secondary" onclick="lockApp()">🔒 Lock</button>
+      <button class="btn btn-secondary" id="exportJsonBtn">📥 Export JSON</button>
+      <button class="btn btn-secondary" id="importJsonBtn">📤 Import JSON</button>
+      <input type="file" id="importFileInput" accept=".json" style="display: none;">
+      <button class="btn btn-secondary" id="changePasscodeMenuBtn">🔑 Change Passcode</button>
+      <button class="btn btn-secondary" id="lockAppBtn">🔒 Lock</button>
     </div>
   </div>
 
   <!-- ============================= OVERVIEW VIEW ============================= -->
   <div id="overviewView">
     <div class="toolbar-row no-print">
-      <button class="btn btn-secondary" onclick="openMembersModal()">👥 Members</button>
-      <button class="btn btn-secondary" onclick="printCurrentView()">🖨️ Print Report</button>
-      <button class="btn" onclick="openQuickAddModal()">+ Add Record</button>
+      <button class="btn btn-secondary" id="openMembersBtn">👥 Members</button>
+      <button class="btn btn-secondary" id="printReportBtn">🖨️ Print Report</button>
+      <button class="btn" id="openQuickAddBtn">+ Add Record</button>
     </div>
 
     <div class="filter-row no-print">
       <label for="ownerFilter">Filter:</label>
-      <select id="ownerFilter" onchange="renderOverviewCards()">
+      <select id="ownerFilter">
         <option value="all">All Owners</option>
       </select>
     </div>
@@ -256,12 +302,12 @@
   <!-- ============================== LEDGER VIEW =============================== -->
   <div id="ledgerView" style="display: none;">
     <div class="ledger-header">
-      <button class="btn btn-back no-print" onclick="backToOverview()">← Back to Overview</button>
+      <button class="btn btn-back no-print" id="backToOverviewBtn">← Back to Overview</button>
       <div class="ledger-title">
         <span id="ledgerMemberName"></span>
         <span id="ledgerTypeBadge" class="badge"></span>
       </div>
-      <button class="btn btn-secondary no-print" onclick="printCurrentView()">🖨️ Print / View Report</button>
+      <button class="btn btn-secondary no-print" id="printLedgerBtn">🖨️ Print / View Report</button>
     </div>
 
     <!-- ---------------------------- LHDN Ledger Content ---------------------------- -->
@@ -282,7 +328,7 @@
 
       <!-- Input/Edit Form (collapsible) -->
       <div class="card">
-        <button type="button" class="btn btn-secondary form-toggle-btn no-print" id="toggleLhdnFormBtn" onclick="toggleLhdnForm()">+ Add New Entry</button>
+        <button type="button" class="btn btn-secondary form-toggle-btn no-print" id="toggleLhdnFormBtn">+ Add New Entry</button>
 
         <div id="lhdnFormWrapper" style="display: none;">
           <div id="editingBanner" class="editing-banner">
@@ -319,7 +365,7 @@
               <div class="income-source-row">
                 <input type="text" list="companyList" placeholder="Company Name" class="source-name">
                 <input type="number" step="0.01" placeholder="Amount (RM)" class="source-amount">
-                <button type="button" class="btn btn-secondary" onclick="removeSourceRow(this)">X</button>
+                <button type="button" class="btn btn-secondary" data-action="remove-source-row">X</button>
               </div>
             </div>
 
@@ -360,7 +406,7 @@
             </details>
 
             <button type="submit" class="btn" id="submitBtn">Save Record</button>
-            <button type="button" class="btn btn-cancel" id="cancelEditBtn" onclick="resetForm()">Cancel Edit</button>
+            <button type="button" class="btn btn-cancel" id="cancelEditBtn">Cancel Edit</button>
           </form>
         </div>
       </div>
@@ -375,8 +421,8 @@
             </p>
           </div>
           <div class="view-toggle-group no-print">
-            <button type="button" class="view-toggle-btn" id="companyReportTableBtn" onclick="setCompanyReportView('table')">📋 Table View</button>
-            <button type="button" class="view-toggle-btn active" id="companyReportCardBtn" onclick="setCompanyReportView('card')">🗃️ Card View</button>
+            <button type="button" class="view-toggle-btn" id="companyReportTableBtn">📋 Table View</button>
+            <button type="button" class="view-toggle-btn active" id="companyReportCardBtn">🗃️ Card View</button>
           </div>
         </div>
 
@@ -443,7 +489,7 @@
 
       <!-- IRAS Entry Form (collapsible) -->
       <div class="card">
-        <button type="button" class="btn btn-secondary form-toggle-btn no-print" id="toggleIrasFormBtn" onclick="toggleIrasForm()" style="border-color: var(--iras-red);">+ Add New Entry</button>
+        <button type="button" class="btn btn-secondary form-toggle-btn no-print" id="toggleIrasFormBtn" style="border-color: var(--iras-red);">+ Add New Entry</button>
 
         <div id="irasFormWrapper" style="display: none;">
           <div id="editingIrasBanner" class="editing-banner-iras">
@@ -485,7 +531,7 @@
             </div>
 
             <button type="submit" class="btn" id="irasSubmitBtn" style="background: var(--iras-red);">Save IRAS Record</button>
-            <button type="button" class="btn btn-cancel" id="cancelIrasEditBtn" onclick="resetIrasForm()">Cancel Edit</button>
+            <button type="button" class="btn btn-cancel" id="cancelIrasEditBtn">Cancel Edit</button>
           </form>
         </div>
       </div>
@@ -528,11 +574,11 @@
       <input type="number" id="newMemberBirthYear" placeholder="Birth year (optional)" style="width: 140px;">
       <label><input type="checkbox" id="newMemberLhdn" checked> LHDN (Malaysia)</label>
       <label><input type="checkbox" id="newMemberIras" checked> IRAS (Singapore)</label>
-      <button class="btn" onclick="addMemberFromModal()">Add</button>
+      <button class="btn" id="addMemberBtn">Add</button>
     </div>
 
     <div class="modal-actions">
-      <button class="btn btn-secondary" onclick="closeMembersModal()">Close</button>
+      <button class="btn btn-secondary" id="closeMembersModalBtn">Close</button>
     </div>
   </div>
 </div>
@@ -543,15 +589,15 @@
     <h2>Add Record</h2>
     <div class="form-group">
       <label for="quickAddMember">Member</label>
-      <select id="quickAddMember" onchange="updateQuickAddTypeOptions()"></select>
+      <select id="quickAddMember"></select>
     </div>
     <div class="form-group">
       <label for="quickAddType">Tax Type</label>
       <select id="quickAddType"></select>
     </div>
     <div class="modal-actions">
-      <button class="btn btn-secondary" onclick="closeQuickAddModal()">Cancel</button>
-      <button class="btn" onclick="quickAddGo()">Go to Ledger</button>
+      <button class="btn btn-secondary" id="closeQuickAddModalBtn">Cancel</button>
+      <button class="btn" id="quickAddGoBtn">Go to Ledger</button>
     </div>
   </div>
 </div>
@@ -574,8 +620,8 @@
     </div>
     <div id="changePasscodeError" class="lock-error" style="display: none;"></div>
     <div class="modal-actions">
-      <button class="btn btn-secondary" onclick="closeChangePasscodeModal()">Cancel</button>
-      <button class="btn" id="changePasscodeBtn" onclick="handleChangePasscode()">Update Passcode</button>
+      <button class="btn btn-secondary" id="closeChangePasscodeModalBtn">Cancel</button>
+      <button class="btn" id="changePasscodeBtn">Update Passcode</button>
     </div>
   </div>
 </div>
@@ -587,7 +633,7 @@
 
     <div class="toggle-row">
       <label class="toggle-switch">
-        <input type="checkbox" id="exportEncryptToggle" checked onchange="updateExportModalView()">
+        <input type="checkbox" id="exportEncryptToggle" checked>
         <span class="toggle-slider"></span>
       </label>
       <span>加密导出 (Encrypt this backup)</span>
@@ -612,8 +658,8 @@
     <div id="exportError" class="lock-error" style="display: none;"></div>
 
     <div class="modal-actions">
-      <button class="btn btn-secondary" onclick="closeExportModal()">Cancel</button>
-      <button class="btn" onclick="performExport()">Export</button>
+      <button class="btn btn-secondary" id="closeExportModalBtn">Cancel</button>
+      <button class="btn" id="performExportBtn">Export</button>
     </div>
   </div>
 </div>
@@ -625,12 +671,12 @@
     <p style="font-size: 0.85rem; color: var(--text-muted); margin-bottom: 1rem;">This backup file is encrypted. Enter the backup passcode to import it.</p>
     <div class="form-group">
       <label for="importBackupPasscode">Backup Passcode</label>
-      <input type="password" id="importBackupPasscode" placeholder="Backup passcode" onkeydown="if(event.key==='Enter') decryptAndImport()">
+      <input type="password" id="importBackupPasscode" placeholder="Backup passcode">
     </div>
     <div id="importPasscodeError" class="lock-error" style="display: none;"></div>
     <div class="modal-actions">
-      <button class="btn btn-secondary" onclick="closeImportPasscodeModal()">Cancel</button>
-      <button class="btn" onclick="decryptAndImport()">Decrypt &amp; Import</button>
+      <button class="btn btn-secondary" id="closeImportPasscodeModalBtn">Cancel</button>
+      <button class="btn" id="decryptImportBtn">Decrypt &amp; Import</button>
     </div>
   </div>
 </div>
@@ -1255,8 +1301,8 @@
     row.className = 'income-source-row';
     row.innerHTML = `
       <input type="text" list="companyList" placeholder="Company Name" class="source-name" value="${escapeHtml(name)}">
-      <input type="number" step="0.01" placeholder="Amount (RM)" class="source-amount" value="${amount}">
-      <button type="button" class="btn btn-secondary" onclick="removeSourceRow(this)">X</button>
+      <input type="number" step="0.01" placeholder="Amount (RM)" class="source-amount" value="${escapeHtml(amount)}">
+      <button type="button" class="btn btn-secondary" data-action="remove-source-row">X</button>
     `;
     incomeSourcesContainer.appendChild(row);
   }
@@ -1497,7 +1543,7 @@
         const records = await getRecordsByMember(m.id);
         const totals = computeLhdnTotals(records);
         cardsHtml += `
-          <div class="member-card lhdn-card" onclick="openLedger(${m.id}, 'lhdn')">
+          <div class="member-card lhdn-card" data-action="open-ledger" data-id="${m.id}" data-type="lhdn">
             <div class="member-card-badge">LHDN · Malaysia</div>
             <div class="member-card-name">${escapeHtml(m.name)}</div>
             <div class="member-card-stats">
@@ -1513,7 +1559,7 @@
         const irasRecords = await getIrasRecordsByMember(m.id);
         const totals = computeIrasTotals(irasRecords);
         cardsHtml += `
-          <div class="member-card iras-card" onclick="openLedger(${m.id}, 'iras')">
+          <div class="member-card iras-card" data-action="open-ledger" data-id="${m.id}" data-type="iras">
             <div class="member-card-badge">IRAS · Singapore</div>
             <div class="member-card-name">${escapeHtml(m.name)}</div>
             <div class="member-card-stats">
@@ -1637,8 +1683,8 @@
           <input type="number" value="${m.birthYear || ''}" id="memberBirthYear_${m.id}" placeholder="Birth year" style="width: 110px;">
           <label><input type="checkbox" id="memberLhdn_${m.id}" ${t.lhdn ? 'checked' : ''}> LHDN</label>
           <label><input type="checkbox" id="memberIras_${m.id}" ${t.iras ? 'checked' : ''}> IRAS</label>
-          <button class="btn btn-secondary" onclick="saveMemberEdits(${m.id})">Save</button>
-          <button class="icon-btn delete" title="Delete Member" onclick="deleteMemberEntirely(${m.id})">
+          <button class="btn btn-secondary" data-action="save-member-edits" data-id="${m.id}">Save</button>
+          <button class="icon-btn delete" title="Delete Member" data-action="delete-member-entirely" data-id="${m.id}">
             <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor">
               <path stroke-linecap="round" stroke-linejoin="round" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
             </svg>
@@ -2066,12 +2112,12 @@
           <td style="color: var(--danger);">${taxAmountStr}</td>
           <td style="color: var(--success); font-weight: bold;">${formatCurrency(effectiveNet, 'MYR')}</td>
           <td class="no-print">
-            <button class="icon-btn edit" title="Edit Record" onclick="editRecord(${r.id})">
+            <button class="icon-btn edit" title="Edit Record" data-action="edit-record" data-id="${r.id}">
               <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                 <path stroke-linecap="round" stroke-linejoin="round" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
               </svg>
             </button>
-            <button class="icon-btn delete" title="Delete Record" onclick="deleteRecord(${r.id})">
+            <button class="icon-btn delete" title="Delete Record" data-action="delete-record" data-id="${r.id}">
               <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                 <path stroke-linecap="round" stroke-linejoin="round" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
               </svg>
@@ -2206,12 +2252,12 @@
           <td style="color: var(--iras-red); font-weight: bold;">${taxPaymentStr}</td>
           <td style="color: var(--success); font-weight: bold;">${netIncomeStr}</td>
           <td class="no-print">
-            <button class="icon-btn edit" title="Edit IRAS Record" onclick="editIrasRecord(${r.id})">
+            <button class="icon-btn edit" title="Edit IRAS Record" data-action="edit-iras-record" data-id="${r.id}">
               <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                 <path stroke-linecap="round" stroke-linejoin="round" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
               </svg>
             </button>
-            <button class="icon-btn delete" title="Delete IRAS Record" onclick="deleteIrasRecord(${r.id})">
+            <button class="icon-btn delete" title="Delete IRAS Record" data-action="delete-iras-record" data-id="${r.id}">
               <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                 <path stroke-linecap="round" stroke-linejoin="round" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
               </svg>
@@ -2221,6 +2267,91 @@
       `;
     }).join('');
   }
+
+  // ============================================================
+  // Event Wiring (no inline handlers)
+  // ------------------------------------------------------------
+  // CSP's script-src has no 'unsafe-inline', so every click / change /
+  // keydown that used to be an onclick="..."/onchange="..."/onkeydown="..."
+  // attribute in the HTML is wired up here instead.
+  // ============================================================
+
+  // Static, always-present buttons: id -> click handler.
+  const staticClickHandlers = {
+    setupPasscodeBtn: () => handleSetupPasscode(),
+    unlockBtn: () => handleUnlock(),
+    exportJsonBtn: () => openExportModal(),
+    importJsonBtn: () => document.getElementById('importFileInput').click(),
+    changePasscodeMenuBtn: () => openChangePasscodeModal(),
+    lockAppBtn: () => lockApp(),
+    openMembersBtn: () => openMembersModal(),
+    printReportBtn: () => printCurrentView(),
+    openQuickAddBtn: () => openQuickAddModal(),
+    backToOverviewBtn: () => backToOverview(),
+    printLedgerBtn: () => printCurrentView(),
+    toggleLhdnFormBtn: () => toggleLhdnForm(),
+    cancelEditBtn: () => resetForm(),
+    companyReportTableBtn: () => setCompanyReportView('table'),
+    companyReportCardBtn: () => setCompanyReportView('card'),
+    toggleIrasFormBtn: () => toggleIrasForm(),
+    cancelIrasEditBtn: () => resetIrasForm(),
+    addMemberBtn: () => addMemberFromModal(),
+    closeMembersModalBtn: () => closeMembersModal(),
+    closeQuickAddModalBtn: () => closeQuickAddModal(),
+    quickAddGoBtn: () => quickAddGo(),
+    closeChangePasscodeModalBtn: () => closeChangePasscodeModal(),
+    changePasscodeBtn: () => handleChangePasscode(),
+    closeExportModalBtn: () => closeExportModal(),
+    performExportBtn: () => performExport(),
+    closeImportPasscodeModalBtn: () => closeImportPasscodeModal(),
+    decryptImportBtn: () => decryptAndImport(),
+  };
+  Object.entries(staticClickHandlers).forEach(([id, handler]) => {
+    const el = document.getElementById(id);
+    if (el) el.addEventListener('click', handler);
+    else console.warn(`Event wiring: #${id} not found in DOM.`);
+  });
+
+  // Dynamically re-rendered elements (records table, IRAS table, members
+  // list, overview cards, income-source rows) carry a data-action
+  // attribute instead of an id, since they're recreated on every render.
+  // One delegated listener on document handles all of them.
+  document.addEventListener('click', (e) => {
+    const target = e.target.closest('[data-action]');
+    if (!target) return;
+    const { action, id, type } = target.dataset;
+    switch (action) {
+      case 'remove-source-row': removeSourceRow(target); break;
+      case 'open-ledger': openLedger(Number(id), type); break;
+      case 'save-member-edits': saveMemberEdits(Number(id)); break;
+      case 'delete-member-entirely': deleteMemberEntirely(Number(id)); break;
+      case 'edit-record': editRecord(Number(id)); break;
+      case 'delete-record': deleteRecord(Number(id)); break;
+      case 'edit-iras-record': editIrasRecord(Number(id)); break;
+      case 'delete-iras-record': deleteIrasRecord(Number(id)); break;
+    }
+  });
+
+  // change listeners (formerly onchange="...")
+  document.getElementById('importFileInput').addEventListener('change', importJSON);
+  ownerFilter.addEventListener('change', renderOverviewCards);
+  document.getElementById('quickAddMember').addEventListener('change', updateQuickAddTypeOptions);
+  document.getElementById('exportEncryptToggle').addEventListener('change', updateExportModalView);
+
+  // keydown listeners (formerly onkeydown="...") — Enter-to-advance /
+  // Enter-to-submit on passcode fields.
+  document.getElementById('setupPasscode').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') document.getElementById('setupPasscodeConfirm').focus();
+  });
+  document.getElementById('setupPasscodeConfirm').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') handleSetupPasscode();
+  });
+  document.getElementById('unlockPasscode').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') handleUnlock();
+  });
+  document.getElementById('importBackupPasscode').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') decryptAndImport();
+  });
 
   // ============================================================
   // App Initialization
@@ -2251,5 +2382,24 @@
   }
 </script>
 
+<!--
+  SRI reference (Subresource Integrity)
+  --------------------------------------
+  No external <script> is loaded today, so there is nothing to pin yet.
+  If a library is added from cdnjs or jsdelivr in future, load it like this
+  so a compromised/poisoned CDN file is rejected by the browser instead of
+  silently executing:
+
+    <script
+      src="https://cdnjs.cloudflare.com/ajax/libs/<lib>/<version>/<file>.min.js"
+      integrity="sha384-<hash-from-the-cdn-provider-or-`openssl dgst -sha384 -binary file.js | openssl base64 -A`>"
+      crossorigin="anonymous"
+      referrerpolicy="no-referrer"></script>
+
+  Get the integrity hash from the CDN's own copy button (cdnjs and
+  jsdelivr both show it next to each file/version), never compute it from a
+  copy you already trust locally without cross-checking against the
+  provider's published hash.
+-->
 </body>
 </html>

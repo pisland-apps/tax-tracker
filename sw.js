@@ -4,7 +4,7 @@
 // Bump it by 1 every time index.html (or any cached asset) changes, so
 // returning visitors' browsers pick up the new version instead of
 // continuing to serve a stale cached copy.
-const CACHE_VERSION = 1;
+const CACHE_VERSION = 2;
 const CACHE_NAME = `tax-tracker-cache-v${CACHE_VERSION}`;
 
 const APP_SHELL = [
