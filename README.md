@@ -54,7 +54,7 @@ GitHub Pages at all.
 
 ## Bumping the service worker cache version
 
-`sw.js` starts with:
+`sw.js` starts with:-
 
 ```js
 const CACHE_VERSION = 1;
