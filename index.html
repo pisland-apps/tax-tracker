@@ -1,0 +1,2405 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <!--
+    Content-Security-Policy
+    ========================
+    No 'unsafe-inline' in script-src. This works because:
+      1. Every onclick/onchange/onkeydown attribute has been removed in
+         favor of addEventListener + data-* attributes (see "Event Wiring"
+         near the end of the <script> block) — CSP blocks inline event
+         handler attributes outright, there's no way to allow specific
+         ones, so they all had to go.
+      2. The one inline <script>...</script> block that remains (the app
+         logic itself) is allow-listed by its exact SHA-256 hash below,
+         instead of by 'unsafe-inline'. The browser hashes the script's
+         contents at load time and only runs it if the hash matches.
+
+    >>> WHEN YOU EDIT ANYTHING INSIDE <script>...</script>, THE HASH BELOW
+    >>> GOES STALE and the app will fail to load (silently, in the console
+    >>> as a CSP violation) until you regenerate it. Regenerate with:
+    >>>   python3 -c "
+    >>>   import hashlib, base64
+    >>>   lines = open('index.html', encoding='utf-8').readlines()
+    >>>   s = next(i for i,l in enumerate(lines) if l.strip()=='<script>')
+    >>>   e = next(i for i,l in enumerate(lines) if l.strip()=='</script>' and i>s)
+    >>>   body = ''.join(lines[s+1:e])
+    >>>   print('sha256-' + base64.b64encode(hashlib.sha256(body.encode()).digest()).decode())"
+    >>> then paste the output in place of the 'sha256-...' value below.
+    >>> (matches on the LINE '<script>'/'</script>' by itself — not any
+    >>> mention of the word inside this comment — so it always finds the
+    >>> real block even as this comment changes.) An injected/tampered
+    >>> script will have a different hash and simply be refused execution.
+
+    An attacker who finds an XSS bug and manages to inject a NEW <script>
+    tag, an onerror= attribute, or a javascript: URL will have it silently
+    blocked, since none of those match the allow-listed hash or come from
+    an allow-listed host.
+
+    script-src also explicitly allowlists cdnjs and jsdelivr (rather than
+    leaving them out) so that if a library is added later, it can ONLY
+    come from these two CDNs and nothing else — see the SRI note near
+    </body> for how to pin such a script with its own integrity hash.
+
+    style-src keeps 'unsafe-inline' — the app still uses inline <style>
+    and style="..." attributes extensively (69+ instances), and CSS alone
+    can't execute JavaScript, so this is a much lower-risk exception than
+    script-src ever was.
+  -->
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self' 'sha256-6hXizDTlAmq/DTYx+sDbeQYdJeLBd6wvXnepOZIBTac=' https://cdnjs.cloudflare.com https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline'; img-src 'self'; font-src 'self'; connect-src 'self'; worker-src 'self'; manifest-src 'self'; base-uri 'none'; form-action 'self'; object-src 'none'">
+  <title>Tax Record &amp; Income Tracker</title>
+  <link rel="manifest" href="manifest.json">
+  <meta name="theme-color" content="#2563eb">
+  <meta name="description" content="Malaysia (LHDN) &amp; Singapore (IRAS) tax record tracker — local, encrypted, offline-capable.">
+  <link rel="icon" href="icons/icon-192.png" type="image/png">
+  <link rel="apple-touch-icon" href="icons/icon-192.png">
+  <style>
+    :root {
+      --bg: #f8fafc;
+      --card-bg: #ffffff;
+      --text: #0f172a;
+      --text-muted: #64748b;
+      --border: #e2e8f0;
+      --primary: #2563eb;
+      --primary-hover: #1d4ed8;
+      --danger: #ef4444;
+      --success: #10b981;
+      --warning: #f59e0b;
+      --lhdn-purple: #7c3aed;
+      --iras-red: #d0263a;
+      --radius: 8px;
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; font-family: system-ui, -apple-system, sans-serif; }
+    body { background-color: var(--bg); color: var(--text); padding: 2rem 1rem; line-height: 1.5; }
+    .container { max-width: 1100px; margin: 0 auto; display: flex; flex-direction: column; gap: 1.5rem; }
+
+    .header-bar { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 1rem; }
+    .header-bar p.subtitle { color: var(--text-muted); font-size: 0.9rem; margin-top: 0.15rem; }
+    .action-buttons { display: flex; gap: 0.5rem; align-items: center; }
+
+    h1, h2, h3 { font-weight: 600; }
+    .card { background: var(--card-bg); border: 1px solid var(--border); border-radius: var(--radius); padding: 1.5rem; box-shadow: 0 1px 3px rgba(0,0,0,0.05); }
+
+    #appErrorBanner { display: none; background: #fef2f2; border: 1px solid #fecaca; color: #991b1b; padding: 1rem; border-radius: var(--radius); font-weight: 500; }
+
+    /* Single Total Summary Card */
+    .single-summary-card { background: linear-gradient(135deg, #f0fdf4 0%, #dcfce7 100%); border: 1px solid #bbf7d0; border-radius: var(--radius); padding: 1.25rem; display: flex; flex-direction: column; gap: 0.25rem; align-items: flex-start; }
+    .single-summary-card.summary-card-tax { background: linear-gradient(135deg, #fef2f2 0%, #fee2e2 100%); border-color: #fecaca; }
+    .single-summary-card.summary-card-tax .summary-label { color: #991b1b; }
+    .single-summary-card.summary-card-tax .summary-value { color: #b91c1c; }
+    .single-summary-card.summary-card-neutral { background: linear-gradient(135deg, #eff6ff 0%, #dbeafe 100%); border-color: #bfdbfe; }
+    .single-summary-card.summary-card-neutral .summary-label { color: #1e3a8a; }
+    .single-summary-card.summary-card-neutral .summary-value { color: #1d4ed8; }
+    .summary-label { font-size: 0.85rem; text-transform: uppercase; letter-spacing: 0.05em; font-weight: 700; color: #166534; }
+    .summary-value { font-size: 2rem; font-weight: 800; color: #15803d; }
+
+    .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; }
+    .grid-3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 1rem; }
+    @media (max-width: 768px) { .grid-2, .grid-3 { grid-template-columns: 1fr; } }
+
+    .form-group { display: flex; flex-direction: column; gap: 0.35rem; margin-bottom: 1rem; }
+    label { font-size: 0.875rem; font-weight: 500; color: var(--text-muted); }
+    input, select { padding: 0.6rem; border: 1px solid var(--border); border-radius: var(--radius); font-size: 0.95rem; outline: none; }
+    input:focus, select:focus { border-color: var(--primary); }
+
+    .btn { background: var(--primary); color: white; border: none; padding: 0.6rem 1.2rem; border-radius: var(--radius); font-weight: 500; cursor: pointer; transition: background 0.2s; display: inline-flex; align-items: center; gap: 0.4rem; font-size: 0.9rem; }
+    .btn:hover { background: var(--primary-hover); }
+    .btn-secondary { background: #e2e8f0; color: var(--text); }
+    .btn-secondary:hover { background: #cbd5e1; }
+    .btn-cancel { background: #94a3b8; color: white; margin-left: 0.5rem; display: none; }
+
+    /* Icon Buttons */
+    .icon-btn { background: transparent; border: none; cursor: pointer; padding: 0.35rem; border-radius: 4px; display: inline-flex; align-items: center; justify-content: center; transition: background 0.2s; }
+    .icon-btn:hover { background: #f1f5f9; }
+    .icon-btn.edit { color: var(--warning); }
+    .icon-btn.delete { color: var(--danger); }
+    .icon-btn svg { width: 18px; height: 18px; stroke-width: 2; }
+
+    .income-source-row { display: flex; gap: 0.5rem; margin-bottom: 0.5rem; }
+    .income-source-row input { flex: 1; }
+
+    table { width: 100%; border-collapse: collapse; margin-top: 1rem; font-size: 0.85rem; }
+    th, td { text-align: left; padding: 0.75rem; border-bottom: 1px solid var(--border); vertical-align: top; }
+    th { background-color: #f1f5f9; color: var(--text-muted); font-weight: 600; }
+
+    .badge { display: inline-block; padding: 0.2rem 0.5rem; border-radius: 4px; font-size: 0.75rem; font-weight: 600; background: #e0f2fe; color: #0369a1; }
+    .badge-lhdn { background: #f3e8ff; color: var(--lhdn-purple); }
+    .badge-iras { background: #fde8ea; color: var(--iras-red); }
+    .editing-banner { background: #fffbeb; border: 1px solid #fde68a; padding: 0.5rem 1rem; border-radius: var(--radius); margin-bottom: 1rem; display: none; color: #92400e; font-weight: 500; }
+    .editing-banner-iras { background: #fef2f3; border: 1px solid #f9c9cd; padding: 0.5rem 1rem; border-radius: var(--radius); margin-bottom: 1rem; display: none; color: #9f1c2e; font-weight: 500; }
+
+    details.lhdn-details { background: #faf5ff; border: 1px solid #e9d5ff; padding: 0.75rem 1rem; border-radius: var(--radius); margin-bottom: 1rem; }
+    details.lhdn-details summary { cursor: pointer; font-weight: 600; color: var(--lhdn-purple); font-size: 0.95rem; }
+    details.lhdn-details[open] summary { margin-bottom: 0.75rem; }
+
+    .iras-header { display: flex; align-items: center; gap: 0.6rem; }
+    .iras-flag { display: inline-flex; width: 22px; height: 15px; border-radius: 2px; overflow: hidden; box-shadow: 0 0 0 1px var(--border); flex-shrink: 0; }
+    .iras-flag div:first-child { background: var(--iras-red); height: 50%; }
+    .iras-flag div:last-child { background: #ffffff; height: 50%; }
+
+    /* Toolbar & Filter (Overview) */
+    .toolbar-row { display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; background: #eef2f7; padding: 0.75rem; border-radius: var(--radius); }
+    .filter-row { display: flex; align-items: center; gap: 0.6rem; flex-wrap: wrap; }
+    .filter-row label { font-weight: 600; color: var(--text); }
+    .filter-row select { min-width: 180px; }
+
+    /* Overview Cards */
+    .cards-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 1rem; align-items: start; }
+    .member-card { background: var(--card-bg); border: 1px solid var(--border); border-radius: var(--radius); padding: 1.1rem; cursor: pointer; transition: transform 0.15s, box-shadow 0.15s; box-shadow: 0 1px 3px rgba(0,0,0,0.05); }
+    .member-card:hover { transform: translateY(-2px); box-shadow: 0 4px 14px rgba(0,0,0,0.1); }
+    .member-card.lhdn-card { border-top: 4px solid var(--lhdn-purple); }
+    .member-card.iras-card { border-top: 4px solid var(--iras-red); }
+    .member-card-badge { display: inline-block; font-size: 0.7rem; font-weight: 700; letter-spacing: 0.05em; padding: 0.15rem 0.5rem; border-radius: 4px; margin-bottom: 0.6rem; }
+    .member-card.lhdn-card .member-card-badge { background: #f3e8ff; color: var(--lhdn-purple); }
+    .member-card.iras-card .member-card-badge { background: #fde8ea; color: var(--iras-red); }
+    .member-card-name { font-size: 1.15rem; font-weight: 700; margin-bottom: 0.6rem; }
+    .member-card-stats { font-size: 0.85rem; color: var(--text-muted); display: flex; flex-direction: column; gap: 0.3rem; }
+    .member-card-stats strong { color: var(--text); }
+    .empty-state { grid-column: 1 / -1; color: var(--text-muted); text-align: center; padding: 2rem; }
+
+    /* Ledger Header */
+    .ledger-header { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 0.75rem; }
+    .ledger-title { display: flex; align-items: center; gap: 0.6rem; font-size: 1.3rem; font-weight: 700; flex-wrap: wrap; }
+    .btn-back { background: #e2e8f0; color: var(--text); }
+    .btn-back:hover { background: #cbd5e1; }
+
+    /* Modals */
+    .modal-overlay { position: fixed; inset: 0; background: rgba(15,23,42,0.5); display: none; align-items: center; justify-content: center; z-index: 100; padding: 1rem; }
+    .modal-overlay.open { display: flex; }
+    .modal-card { background: var(--card-bg); border-radius: var(--radius); padding: 1.5rem; max-width: 560px; width: 100%; max-height: 85vh; overflow-y: auto; box-shadow: 0 10px 40px rgba(0,0,0,0.25); }
+    .modal-card h2 { margin-bottom: 1rem; }
+    .member-row { display: flex; align-items: center; gap: 0.6rem; padding: 0.6rem 0; border-bottom: 1px solid var(--border); flex-wrap: wrap; }
+    .member-row input[type="text"] { min-width: 120px; flex: 1; }
+    .member-row label { font-size: 0.8rem; color: var(--text-muted); display: flex; align-items: center; gap: 0.3rem; white-space: nowrap; }
+    .modal-actions { display: flex; justify-content: flex-end; gap: 0.5rem; margin-top: 1rem; }
+    .add-member-form { margin-top: 0.75rem; display: flex; gap: 0.6rem; align-items: center; flex-wrap: wrap; }
+    .add-member-form input[type="text"] { flex: 1; min-width: 140px; }
+    .add-member-form label { font-size: 0.85rem; display: flex; align-items: center; gap: 0.3rem; white-space: nowrap; }
+
+    .form-toggle-btn { margin-bottom: 1rem; }
+
+    .lock-screen { position: fixed; inset: 0; background: linear-gradient(135deg, #eef2ff 0%, #f8fafc 100%); display: flex; align-items: center; justify-content: center; z-index: 200; padding: 1rem; }
+    .lock-card { background: var(--card-bg); border-radius: var(--radius); padding: 2rem; max-width: 420px; width: 100%; box-shadow: 0 10px 40px rgba(0,0,0,0.15); }
+    .lock-card h1 { font-size: 1.3rem; text-align: center; margin-bottom: 1rem; }
+    .lock-card p { color: var(--text-muted); font-size: 0.85rem; text-align: center; margin-bottom: 1.25rem; }
+    .lock-error { background: #fef2f2; border: 1px solid #fecaca; color: #991b1b; padding: 0.6rem 0.75rem; border-radius: var(--radius); font-size: 0.85rem; margin-bottom: 0.75rem; }
+
+    .toggle-row { display: flex; align-items: center; gap: 0.75rem; margin-bottom: 1rem; }
+    .toggle-switch { position: relative; display: inline-block; width: 44px; height: 24px; flex-shrink: 0; }
+    .toggle-switch input { opacity: 0; width: 0; height: 0; }
+    .toggle-slider { position: absolute; cursor: pointer; top: 0; left: 0; right: 0; bottom: 0; background-color: #cbd5e1; transition: 0.2s; border-radius: 24px; }
+    .toggle-slider:before { position: absolute; content: ""; height: 18px; width: 18px; left: 3px; bottom: 3px; background-color: white; transition: 0.2s; border-radius: 50%; }
+    .toggle-switch input:checked + .toggle-slider { background-color: var(--primary); }
+    .toggle-switch input:checked + .toggle-slider:before { transform: translateX(20px); }
+
+    .view-toggle-group { display: inline-flex; border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; flex-shrink: 0; }
+    .view-toggle-btn { background: #f1f5f9; color: var(--text-muted); border: none; padding: 0.5rem 0.9rem; font-size: 0.85rem; font-weight: 500; cursor: pointer; transition: background 0.15s, color 0.15s; }
+    .view-toggle-btn:not(:last-child) { border-right: 1px solid var(--border); }
+    .view-toggle-btn.active { background: var(--primary); color: white; }
+
+    .company-card { background: var(--card-bg); border: 1px solid var(--border); border-radius: var(--radius); padding: 1.1rem; border-top: 4px solid var(--primary); }
+    .company-card-name { font-size: 1.05rem; font-weight: 700; margin-bottom: 0.5rem; }
+    .company-card-breakdown { font-size: 0.85rem; color: var(--text-muted); display: flex; flex-direction: column; gap: 0.2rem; margin: 0.6rem 0; }
+    .company-card-breakdown strong { color: var(--text); }
+    .company-card-total { font-size: 0.95rem; font-weight: 700; color: var(--success); border-top: 1px solid var(--border); padding-top: 0.6rem; margin-top: 0.4rem; }
+
+    /* Long-history companies span extra grid width and lay their yearly
+       breakdown out in columns instead of one long vertical list. */
+    .company-card.wide-2 { grid-column: span 2; }
+    .company-card.wide-3 { grid-column: span 3; }
+    .company-card-breakdown.multi-col-2, .company-card-breakdown.multi-col-3 { display: block; }
+    .company-card-breakdown.multi-col-2 { column-count: 2; column-gap: 1.25rem; }
+    .company-card-breakdown.multi-col-3 { column-count: 3; column-gap: 1.25rem; }
+    .company-card-breakdown.multi-col-2 div, .company-card-breakdown.multi-col-3 div { break-inside: avoid; }
+    @media (max-width: 640px) {
+      .company-card.wide-2, .company-card.wide-3 { grid-column: span 1; }
+      .company-card-breakdown.multi-col-2, .company-card-breakdown.multi-col-3 { column-count: 1; }
+    }
+
+    @media print {
+      .no-print { display: none !important; }
+      body { padding: 0; background: white; }
+      .card { box-shadow: none; border: 1px solid #ccc; break-inside: avoid; }
+      .container { max-width: 100%; }
+    }
+  </style>
+</head>
+<body>
+
+<!-- ============================= LOCK SCREEN ============================= -->
+<div id="lockScreen" class="lock-screen">
+  <div class="lock-card">
+    <h1>🔒 Tax Record &amp; Income Tracker</h1>
+
+    <div id="lockSetupView">
+      <p>Set a passcode to encrypt and protect your tax records on this device. This passcode is never stored — if you forget it, your encrypted records cannot be recovered.</p>
+      <div class="form-group">
+        <label for="setupPasscode">New Passcode (min. 6 characters)</label>
+        <input type="password" id="setupPasscode" placeholder="Choose a passcode">
+      </div>
+      <div class="form-group">
+        <label for="setupPasscodeConfirm">Confirm Passcode</label>
+        <input type="password" id="setupPasscodeConfirm" placeholder="Re-enter passcode">
+      </div>
+      <button class="btn" style="width: 100%; justify-content: center;" id="setupPasscodeBtn">Set Passcode &amp; Continue</button>
+    </div>
+
+    <div id="lockUnlockView" style="display: none;">
+      <p>Enter your passcode to unlock your records.</p>
+      <div class="form-group">
+        <label for="unlockPasscode">Passcode</label>
+        <input type="password" id="unlockPasscode" placeholder="Passcode">
+      </div>
+      <button class="btn" style="width: 100%; justify-content: center;" id="unlockBtn">Unlock</button>
+    </div>
+
+    <div id="lockError" class="lock-error" style="display: none;"></div>
+  </div>
+</div>
+
+<div id="appErrorBanner" style="max-width: 1100px; margin: 1rem auto 0;"></div>
+
+<div class="container" id="appContainer" style="display: none;">
+
+  <!-- Top Header with Export / Import Actions -->
+  <div class="header-bar">
+    <div>
+      <h1>Tax Record & Income Tracker</h1>
+      <p class="subtitle">Malaysia (LHDN, RM) &amp; Singapore (IRAS, S$) tax records</p>
+    </div>
+    <div class="action-buttons no-print">
+      <button class="btn btn-secondary" id="exportJsonBtn">📥 Export JSON</button>
+      <button class="btn btn-secondary" id="importJsonBtn">📤 Import JSON</button>
+      <input type="file" id="importFileInput" accept=".json" style="display: none;">
+      <button class="btn btn-secondary" id="changePasscodeMenuBtn">🔑 Change Passcode</button>
+      <button class="btn btn-secondary" id="lockAppBtn">🔒 Lock</button>
+    </div>
+  </div>
+
+  <!-- ============================= OVERVIEW VIEW ============================= -->
+  <div id="overviewView">
+    <div class="toolbar-row no-print">
+      <button class="btn btn-secondary" id="openMembersBtn">👥 Members</button>
+      <button class="btn btn-secondary" id="printReportBtn">🖨️ Print Report</button>
+      <button class="btn" id="openQuickAddBtn">+ Add Record</button>
+    </div>
+
+    <div class="filter-row no-print">
+      <label for="ownerFilter">Filter:</label>
+      <select id="ownerFilter">
+        <option value="all">All Owners</option>
+      </select>
+    </div>
+
+    <div class="cards-grid" id="overviewCardsGrid">
+      <div class="empty-state">Loading…</div>
+    </div>
+  </div>
+
+  <!-- ============================== LEDGER VIEW =============================== -->
+  <div id="ledgerView" style="display: none;">
+    <div class="ledger-header">
+      <button class="btn btn-back no-print" id="backToOverviewBtn">← Back to Overview</button>
+      <div class="ledger-title">
+        <span id="ledgerMemberName"></span>
+        <span id="ledgerTypeBadge" class="badge"></span>
+      </div>
+      <button class="btn btn-secondary no-print" id="printLedgerBtn">🖨️ Print / View Report</button>
+    </div>
+
+    <!-- ---------------------------- LHDN Ledger Content ---------------------------- -->
+    <div id="ledgerLhdnContent">
+
+      <div class="grid-2">
+        <div class="single-summary-card">
+          <div class="summary-label">All-Time Net Income (After Tax &amp; All Adjustments)</div>
+          <div class="summary-value" id="summaryNetIncome">RM 0.00</div>
+        </div>
+        <div class="single-summary-card summary-card-tax">
+          <div class="summary-label">All-Time Total Tax Paid</div>
+          <div class="summary-value" id="summaryTaxPaid">RM 0.00</div>
+        </div>
+      </div>
+
+      <datalist id="companyList"></datalist>
+
+      <!-- Input/Edit Form (collapsible) -->
+      <div class="card">
+        <button type="button" class="btn btn-secondary form-toggle-btn no-print" id="toggleLhdnFormBtn">+ Add New Entry</button>
+
+        <div id="lhdnFormWrapper" style="display: none;">
+          <div id="editingBanner" class="editing-banner">
+            Currently editing record for Working Year: <span id="editingYearText"></span>
+          </div>
+          <h2 id="formTitle">Add Tax &amp; Income Entry</h2>
+
+          <form id="taxForm" style="margin-top: 1rem;">
+            <input type="hidden" id="recordId">
+
+            <div class="grid-3">
+              <div class="form-group">
+                <label for="yearWorking">Year of Working</label>
+                <input type="number" id="yearWorking" placeholder="e.g., 1991" required>
+              </div>
+              <div class="form-group">
+                <label for="yearSubmit">Year Submit <span style="font-weight:400; color: var(--text-muted);">(optional)</span></label>
+                <input type="number" id="yearSubmit" placeholder="e.g., 1992">
+              </div>
+              <div class="form-group">
+                <label for="tahunTaksiran">Tahun Taksiran (YA) <span style="font-weight:400; color: var(--text-muted);">(optional)</span></label>
+                <input type="number" id="tahunTaksiran" placeholder="e.g., 1991">
+              </div>
+            </div>
+
+            <hr style="border: 0; border-top: 1px solid var(--border); margin: 1rem 0;">
+
+            <h3>Income Sources</h3>
+            <p style="font-size: 0.8rem; color: var(--text-muted); margin-bottom: 0.75rem;">
+              Type or select from previously entered companies. Optional if you're only logging an LHDN Adjustment below.
+            </p>
+
+            <div id="incomeSourcesContainer">
+              <div class="income-source-row">
+                <input type="text" list="companyList" placeholder="Company Name" class="source-name">
+                <input type="number" step="0.01" placeholder="Amount (RM)" class="source-amount">
+                <button type="button" class="btn btn-secondary" data-action="remove-source-row">X</button>
+              </div>
+            </div>
+
+            <button type="button" class="btn btn-secondary" id="addSourceBtn" style="margin-bottom: 1.5rem;">+ Add Another Source</button>
+
+            <hr style="border: 0; border-top: 1px solid var(--border); margin: 1rem 0;">
+
+            <div class="grid-2">
+              <div class="form-group">
+                <label for="incomeDeclared">Income Declaration (Manual Key-in) <span style="font-weight:400; color: var(--text-muted);">(optional)</span></label>
+                <input type="number" step="0.01" id="incomeDeclared" placeholder="Leave blank to auto-use sum of income sources">
+                <small id="incomeDeclaredHint" style="color: var(--text-muted);">Defaults to the total of Income Sources above unless you key in a different declared amount.</small>
+                <small id="incomeDeclaredDiff" style="color: var(--warning); font-weight: 600; display: none;"></small>
+              </div>
+              <div class="form-group">
+                <label for="taxAmount">Tax Amount Paid / Payable <span style="font-weight:400; color: var(--text-muted);">(optional)</span></label>
+                <input type="number" step="0.01" id="taxAmount" placeholder="Tax amount (RM)">
+              </div>
+            </div>
+
+            <!-- LHDN Adjustments Section (collapsed by default to keep the entry card compact) -->
+            <details class="lhdn-details">
+              <summary>LHDN Adjustments (Optional)</summary>
+              <div class="grid-3">
+                <div class="form-group">
+                  <label for="lhdnYear">Year of Adjustment</label>
+                  <input type="number" id="lhdnYear" placeholder="e.g., 1993">
+                </div>
+                <div class="form-group">
+                  <label for="lhdnAdjustedIncome">LHDN Adjusted Income (RM)</label>
+                  <input type="number" step="0.01" id="lhdnAdjustedIncome" placeholder="e.g., 200.00">
+                </div>
+                <div class="form-group">
+                  <label for="lhdnAdjustedTax">LHDN Adjusted Tax (RM)</label>
+                  <input type="number" step="0.01" id="lhdnAdjustedTax" placeholder="e.g., 14.00">
+                </div>
+              </div>
+            </details>
+
+            <button type="submit" class="btn" id="submitBtn">Save Record</button>
+            <button type="button" class="btn btn-cancel" id="cancelEditBtn">Cancel Edit</button>
+          </form>
+        </div>
+      </div>
+
+      <!-- Company Income Report -->
+      <div class="card">
+        <div style="display: flex; justify-content: space-between; align-items: flex-start; flex-wrap: wrap; gap: 0.75rem;">
+          <div>
+            <h2>Company Income Report (Year-by-Year)</h2>
+            <p style="font-size: 0.85rem; color: var(--text-muted);">
+              Cumulative income derived by company, broken down and sorted by working years.
+            </p>
+          </div>
+          <div class="view-toggle-group no-print">
+            <button type="button" class="view-toggle-btn" id="companyReportTableBtn">📋 Table View</button>
+            <button type="button" class="view-toggle-btn active" id="companyReportCardBtn">🗃️ Card View</button>
+          </div>
+        </div>
+
+        <table id="companyReportTable" style="display: none;">
+          <thead>
+            <tr>
+              <th>Company / Source</th>
+              <th>Year Range</th>
+              <th>Annual Breakdown</th>
+              <th>Total Income Derived</th>
+            </tr>
+          </thead>
+          <tbody id="companyReportBody">
+            <tr><td colspan="4" style="text-align: center; color: var(--text-muted);">No records found.</td></tr>
+          </tbody>
+        </table>
+
+        <div id="companyReportCards" class="cards-grid" style="display: grid; margin-top: 1rem;"></div>
+      </div>
+
+      <!-- Tax Records Table -->
+      <div class="card">
+        <h2>All Tax Records (Sorted by Working Year)</h2>
+        <div style="overflow-x: auto;">
+          <table>
+            <thead>
+              <tr>
+                <th>Working Year</th>
+                <th>Submit / YA</th>
+                <th>Sources Breakdown</th>
+                <th>Total Derived</th>
+                <th>Declared Income</th>
+                <th>Total Tax Paid</th>
+                <th>Income After Tax</th>
+                <th class="no-print">Actions</th>
+              </tr>
+            </thead>
+            <tbody id="recordsTableBody">
+              <tr><td colspan="8" style="text-align: center; color: var(--text-muted);">No records saved yet.</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <!-- ---------------------------- IRAS Ledger Content ---------------------------- -->
+    <div id="ledgerIrasContent" style="display: none;">
+
+      <div class="grid-3">
+        <div class="single-summary-card">
+          <div class="summary-label">All-Time Net Income</div>
+          <div class="summary-value" id="irasSummaryNetIncome">S$ 0.00</div>
+        </div>
+        <div class="single-summary-card summary-card-neutral">
+          <div class="summary-label">All-Time Total Income (per NOA)</div>
+          <div class="summary-value" id="irasSummaryTotalIncome">S$ 0.00</div>
+        </div>
+        <div class="single-summary-card summary-card-tax">
+          <div class="summary-label">All-Time Total Tax Paid</div>
+          <div class="summary-value" id="irasSummaryTaxPaid">S$ 0.00</div>
+        </div>
+      </div>
+      <p style="font-size: 0.85rem; color: var(--text-muted);"><span id="irasSummaryYears">0</span> year(s) recorded.</p>
+
+      <!-- IRAS Entry Form (collapsible) -->
+      <div class="card">
+        <button type="button" class="btn btn-secondary form-toggle-btn no-print" id="toggleIrasFormBtn" style="border-color: var(--iras-red);">+ Add New Entry</button>
+
+        <div id="irasFormWrapper" style="display: none;">
+          <div id="editingIrasBanner" class="editing-banner-iras">
+            Currently editing IRAS record for Working Year: <span id="editingIrasYearText"></span>
+          </div>
+          <div class="iras-header">
+            <span class="iras-flag"><div></div><div></div></span>
+            <h2 id="irasFormTitle" style="margin: 0;">Add IRAS (Singapore) Tax Entry</h2>
+          </div>
+
+          <form id="irasForm" style="margin-top: 1rem;">
+            <input type="hidden" id="irasRecordId">
+
+            <div class="grid-2">
+              <div class="form-group">
+                <label for="irasYearWorking">Year of Working</label>
+                <input type="number" id="irasYearWorking" placeholder="e.g., 2019" required>
+              </div>
+              <div class="form-group">
+                <label for="irasYearSubmit">Year Submit <span style="font-weight:400; color: var(--text-muted);">(optional)</span></label>
+                <input type="number" id="irasYearSubmit" placeholder="e.g., 2020">
+              </div>
+            </div>
+
+            <div class="grid-2">
+              <div class="form-group">
+                <label for="irasNoa">NOA <span style="font-weight:400; color: var(--text-muted);">(Notice of Assessment, optional)</span></label>
+                <input type="text" id="irasNoa" placeholder="e.g., NOA 2020">
+              </div>
+              <div class="form-group">
+                <label for="irasNoaIncome">Assessable Income <span style="font-weight:400; color: var(--text-muted);">(per NOA, optional)</span></label>
+                <input type="number" step="0.01" id="irasNoaIncome" placeholder="Total income for the year (S$)">
+              </div>
+            </div>
+
+            <div class="form-group">
+              <label for="irasTaxPayment">Tax Payment <span style="font-weight:400; color: var(--text-muted);">(optional)</span></label>
+              <input type="number" step="0.01" id="irasTaxPayment" placeholder="Tax payment (S$)">
+            </div>
+
+            <button type="submit" class="btn" id="irasSubmitBtn" style="background: var(--iras-red);">Save IRAS Record</button>
+            <button type="button" class="btn btn-cancel" id="cancelIrasEditBtn">Cancel Edit</button>
+          </form>
+        </div>
+      </div>
+
+      <!-- IRAS Records Table -->
+      <div class="card">
+        <h2>IRAS (Singapore) Tax Records</h2>
+        <div style="overflow-x: auto;">
+          <table>
+            <thead>
+              <tr>
+                <th>Working Year</th>
+                <th>Year Submit</th>
+                <th>NOA</th>
+                <th>Assessable Income</th>
+                <th>Tax Payment</th>
+                <th>Net Income</th>
+                <th class="no-print">Actions</th>
+              </tr>
+            </thead>
+            <tbody id="irasTableBody">
+              <tr><td colspan="7" style="text-align: center; color: var(--text-muted);">No IRAS records saved yet.</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ============================= MEMBERS MODAL ============================= -->
+<div id="membersModal" class="modal-overlay no-print">
+  <div class="modal-card">
+    <h2>Manage Members</h2>
+    <div id="membersModalList"></div>
+
+    <h3 style="margin-top: 1.25rem;">+ Add New Member</h3>
+    <div class="add-member-form">
+      <input type="text" id="newMemberName" placeholder="Member name">
+      <input type="number" id="newMemberBirthYear" placeholder="Birth year (optional)" style="width: 140px;">
+      <label><input type="checkbox" id="newMemberLhdn" checked> LHDN (Malaysia)</label>
+      <label><input type="checkbox" id="newMemberIras" checked> IRAS (Singapore)</label>
+      <button class="btn" id="addMemberBtn">Add</button>
+    </div>
+
+    <div class="modal-actions">
+      <button class="btn btn-secondary" id="closeMembersModalBtn">Close</button>
+    </div>
+  </div>
+</div>
+
+<!-- ============================= QUICK ADD MODAL ============================= -->
+<div id="quickAddModal" class="modal-overlay no-print">
+  <div class="modal-card">
+    <h2>Add Record</h2>
+    <div class="form-group">
+      <label for="quickAddMember">Member</label>
+      <select id="quickAddMember"></select>
+    </div>
+    <div class="form-group">
+      <label for="quickAddType">Tax Type</label>
+      <select id="quickAddType"></select>
+    </div>
+    <div class="modal-actions">
+      <button class="btn btn-secondary" id="closeQuickAddModalBtn">Cancel</button>
+      <button class="btn" id="quickAddGoBtn">Go to Ledger</button>
+    </div>
+  </div>
+</div>
+
+<!-- ============================= CHANGE PASSCODE MODAL ============================= -->
+<div id="changePasscodeModal" class="modal-overlay no-print">
+  <div class="modal-card">
+    <h2>Change Passcode</h2>
+    <div class="form-group">
+      <label for="currentPasscodeInput">Current Passcode</label>
+      <input type="password" id="currentPasscodeInput" placeholder="Current passcode">
+    </div>
+    <div class="form-group">
+      <label for="newPasscodeInput">New Passcode (min. 6 characters)</label>
+      <input type="password" id="newPasscodeInput" placeholder="New passcode">
+    </div>
+    <div class="form-group">
+      <label for="newPasscodeConfirmInput">Confirm New Passcode</label>
+      <input type="password" id="newPasscodeConfirmInput" placeholder="Re-enter new passcode">
+    </div>
+    <div id="changePasscodeError" class="lock-error" style="display: none;"></div>
+    <div class="modal-actions">
+      <button class="btn btn-secondary" id="closeChangePasscodeModalBtn">Cancel</button>
+      <button class="btn" id="changePasscodeBtn">Update Passcode</button>
+    </div>
+  </div>
+</div>
+
+<!-- ============================= EXPORT MODAL ============================= -->
+<div id="exportModal" class="modal-overlay no-print">
+  <div class="modal-card">
+    <h2>Export Backup</h2>
+
+    <div class="toggle-row">
+      <label class="toggle-switch">
+        <input type="checkbox" id="exportEncryptToggle" checked>
+        <span class="toggle-slider"></span>
+      </label>
+      <span>加密导出 (Encrypt this backup)</span>
+    </div>
+
+    <div id="exportEncryptFields">
+      <div class="form-group">
+        <label for="exportPasscode">Backup Passcode (min. 6 characters)</label>
+        <input type="password" id="exportPasscode" placeholder="Set a passcode for this backup file">
+      </div>
+      <div class="form-group">
+        <label for="exportPasscodeConfirm">Confirm Backup Passcode</label>
+        <input type="password" id="exportPasscodeConfirm" placeholder="Re-enter passcode">
+      </div>
+      <p style="font-size: 0.8rem; color: var(--text-muted);">This backup file will need this passcode to be imported later. It can be different from your app unlock passcode.</p>
+    </div>
+
+    <p id="exportPlainWarning" class="lock-error" style="display: none;">
+      ⚠️ 明文备份不含密码保护，请妥善保管
+    </p>
+
+    <div id="exportError" class="lock-error" style="display: none;"></div>
+
+    <div class="modal-actions">
+      <button class="btn btn-secondary" id="closeExportModalBtn">Cancel</button>
+      <button class="btn" id="performExportBtn">Export</button>
+    </div>
+  </div>
+</div>
+
+<!-- ============================= IMPORT PASSCODE MODAL ============================= -->
+<div id="importPasscodeModal" class="modal-overlay no-print">
+  <div class="modal-card">
+    <h2>Encrypted Backup</h2>
+    <p style="font-size: 0.85rem; color: var(--text-muted); margin-bottom: 1rem;">This backup file is encrypted. Enter the backup passcode to import it.</p>
+    <div class="form-group">
+      <label for="importBackupPasscode">Backup Passcode</label>
+      <input type="password" id="importBackupPasscode" placeholder="Backup passcode">
+    </div>
+    <div id="importPasscodeError" class="lock-error" style="display: none;"></div>
+    <div class="modal-actions">
+      <button class="btn btn-secondary" id="closeImportPasscodeModalBtn">Cancel</button>
+      <button class="btn" id="decryptImportBtn">Decrypt &amp; Import</button>
+    </div>
+  </div>
+</div>
+
+<script>
+  // ============================================================
+  // IndexedDB Setup
+  // ============================================================
+  const DB_NAME = 'TaxRecordsMultiMemberDB';
+  const DB_VERSION = 3;
+  const STORE_RECORDS = 'records';
+  const STORE_MEMBERS = 'members';
+  const STORE_IRAS_RECORDS = 'iras_records';
+  const STORE_VAULT = 'vault_meta';
+  let db = null;
+  let currentMemberId = null;   // set whenever a Ledger is opened
+  let ledgerMemberId = null;
+  let ledgerType = null;        // 'lhdn' | 'iras'
+  let currentMemberBirthYear = null; // cached for the open Ledger's Age column
+
+  function showFatalError(msg) {
+    const el = document.getElementById('appErrorBanner');
+    el.textContent = msg;
+    el.style.display = 'block';
+  }
+
+  function initDB() {
+    return new Promise((resolve, reject) => {
+      const request = indexedDB.open(DB_NAME, DB_VERSION);
+
+      request.onupgradeneeded = (e) => {
+        const dbInstance = e.target.result;
+        if (!dbInstance.objectStoreNames.contains(STORE_RECORDS)) {
+          const recStore = dbInstance.createObjectStore(STORE_RECORDS, { keyPath: 'id', autoIncrement: true });
+          recStore.createIndex('memberId', 'memberId', { unique: false });
+        }
+        if (!dbInstance.objectStoreNames.contains(STORE_MEMBERS)) {
+          dbInstance.createObjectStore(STORE_MEMBERS, { keyPath: 'id', autoIncrement: true });
+        }
+        if (!dbInstance.objectStoreNames.contains(STORE_IRAS_RECORDS)) {
+          const irasStore = dbInstance.createObjectStore(STORE_IRAS_RECORDS, { keyPath: 'id', autoIncrement: true });
+          irasStore.createIndex('memberId', 'memberId', { unique: false });
+        }
+        if (!dbInstance.objectStoreNames.contains(STORE_VAULT)) {
+          dbInstance.createObjectStore(STORE_VAULT, { keyPath: 'id' });
+        }
+      };
+
+      request.onblocked = () => {
+        reject(new Error('Database upgrade is blocked by another open tab of this app. Please close any other tabs/windows with this tracker open, then reload this page.'));
+      };
+
+      request.onsuccess = (e) => {
+        db = e.target.result;
+        resolve(db);
+      };
+
+      request.onerror = (e) => reject(e.target.error || new Error('Failed to open the local database.'));
+    });
+  }
+
+  // ============================================================
+  // Encryption: PBKDF2 (key derivation) + AES-GCM (data encryption)
+  // via the Web Crypto API. The derived key lives only in memory
+  // (`vaultKey`) for the current unlocked session — it is never
+  // persisted anywhere. Every table's payload is encrypted before
+  // being written to IndexedDB and decrypted after being read back.
+  // ============================================================
+  const PBKDF2_ITERATIONS = 600000;
+  const VAULT_CHECK_STRING = 'tax-tracker-vault-ok';
+  let vaultKey = null; // CryptoKey, set only after a successful unlock/setup; cleared on Lock
+
+  function bufToB64(buf) {
+    const bytes = new Uint8Array(buf);
+    let binary = '';
+    for (let i = 0; i < bytes.byteLength; i++) binary += String.fromCharCode(bytes[i]);
+    return btoa(binary);
+  }
+
+  function b64ToBuf(b64) {
+    const binary = atob(b64);
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+    return bytes.buffer;
+  }
+
+  async function deriveKeyFromPasscode(passcode, saltB64, iterations = PBKDF2_ITERATIONS) {
+    const salt = b64ToBuf(saltB64);
+    const baseKey = await crypto.subtle.importKey(
+      'raw', new TextEncoder().encode(passcode), 'PBKDF2', false, ['deriveKey']
+    );
+    return crypto.subtle.deriveKey(
+      { name: 'PBKDF2', salt, iterations, hash: 'SHA-256' },
+      baseKey,
+      { name: 'AES-GCM', length: 256 },
+      false,
+      ['encrypt', 'decrypt']
+    );
+  }
+
+  async function encryptObject(obj, key = vaultKey) {
+    const iv = crypto.getRandomValues(new Uint8Array(12));
+    const plaintext = new TextEncoder().encode(JSON.stringify(obj));
+    const ctBuf = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, plaintext);
+    return { iv: bufToB64(iv), ct: bufToB64(ctBuf) };
+  }
+
+  // Throws if the key is wrong (AES-GCM authentication tag check fails) —
+  // callers use this to distinguish "wrong passcode" from real errors.
+  async function decryptObject(encData, key = vaultKey) {
+    const iv = new Uint8Array(b64ToBuf(encData.iv));
+    const ctBuf = b64ToBuf(encData.ct);
+    const ptBuf = await crypto.subtle.decrypt({ name: 'AES-GCM', iv }, key, ctBuf);
+    return JSON.parse(new TextDecoder().decode(ptBuf));
+  }
+
+  function getVaultMeta() {
+    return new Promise((resolve) => {
+      const tx = db.transaction(STORE_VAULT, 'readonly');
+      const store = tx.objectStore(STORE_VAULT);
+      const request = store.get('vault');
+      request.onsuccess = () => resolve(request.result || null);
+    });
+  }
+
+  function saveVaultMeta(meta) {
+    return new Promise((resolve) => {
+      const tx = db.transaction(STORE_VAULT, 'readwrite');
+      const store = tx.objectStore(STORE_VAULT);
+      const request = store.put({ id: 'vault', ...meta });
+      request.onsuccess = () => resolve();
+    });
+  }
+
+  // Returns the derived CryptoKey if the passcode is correct, or null if not.
+  async function verifyPasscode(passcode, meta) {
+    try {
+      const key = await deriveKeyFromPasscode(passcode, meta.salt, meta.iterations || PBKDF2_ITERATIONS);
+      const result = await decryptObject(meta.verify, key);
+      return result === VAULT_CHECK_STRING ? key : null;
+    } catch (e) {
+      return null; // wrong passcode → AES-GCM auth tag check fails → decrypt throws
+    }
+  }
+
+  // Raw (unencrypted-aware) helpers used only for the one-time legacy-data
+  // migration below, where rows may or may not already be in {encData} form.
+  function getAllRaw(storeName) {
+    return new Promise((resolve) => {
+      const tx = db.transaction(storeName, 'readonly');
+      const store = tx.objectStore(storeName);
+      const request = store.getAll();
+      request.onsuccess = () => resolve(request.result || []);
+    });
+  }
+
+  function putRaw(storeName, obj) {
+    return new Promise((resolve) => {
+      const tx = db.transaction(storeName, 'readwrite');
+      const store = tx.objectStore(storeName);
+      const request = store.put(obj);
+      request.onsuccess = () => resolve();
+    });
+  }
+
+  // One-time migration: encrypts any pre-existing plaintext rows (created
+  // before this passcode/encryption feature existed) in place, using the
+  // freshly-set-up vault key. Only runs during initial passcode setup.
+  async function migrateLegacyDataToEncrypted() {
+    const rawMembers = await getAllRaw(STORE_MEMBERS);
+    for (const row of rawMembers) {
+      if (!row.encData) {
+        const { id, ...payload } = row;
+        const encData = await encryptObject(payload);
+        await putRaw(STORE_MEMBERS, { id, encData });
+      }
+    }
+
+    const rawRecords = await getAllRaw(STORE_RECORDS);
+    for (const row of rawRecords) {
+      if (!row.encData) {
+        const { id, memberId, ...payload } = row;
+        const encData = await encryptObject(payload);
+        await putRaw(STORE_RECORDS, { id, memberId, encData });
+      }
+    }
+
+    const rawIras = await getAllRaw(STORE_IRAS_RECORDS);
+    for (const row of rawIras) {
+      if (!row.encData) {
+        const { id, memberId, ...payload } = row;
+        const encData = await encryptObject(payload);
+        await putRaw(STORE_IRAS_RECORDS, { id, memberId, encData });
+      }
+    }
+  }
+
+  // ============================================================
+  // Member DB Methods (encrypted at rest — name & taxTypes are inside encData;
+  // only the numeric `id` primary key stays in the clear)
+  // ============================================================
+  function getMembers() {
+    return new Promise((resolve) => {
+      const tx = db.transaction(STORE_MEMBERS, 'readonly');
+      const store = tx.objectStore(STORE_MEMBERS);
+      const request = store.getAll();
+      request.onsuccess = async () => {
+        const raw = request.result || [];
+        const decrypted = await Promise.all(raw.map(async row => {
+          if (row.encData) {
+            const payload = await decryptObject(row.encData);
+            return { id: row.id, ...payload };
+          }
+          return row;
+        }));
+        resolve(decrypted);
+      };
+    });
+  }
+
+  async function saveMember(name, taxTypes, birthYear) {
+    const encData = await encryptObject({ name, taxTypes: taxTypes || { lhdn: true, iras: true }, birthYear: birthYear || null });
+    return new Promise((resolve) => {
+      const tx = db.transaction(STORE_MEMBERS, 'readwrite');
+      const store = tx.objectStore(STORE_MEMBERS);
+      const request = store.add({ encData });
+      request.onsuccess = () => resolve(request.result);
+    });
+  }
+
+  async function updateMemberInDB(member) {
+    const { id, ...payload } = member;
+    const encData = await encryptObject(payload);
+    return new Promise((resolve) => {
+      const tx = db.transaction(STORE_MEMBERS, 'readwrite');
+      const store = tx.objectStore(STORE_MEMBERS);
+      const request = store.put({ id, encData });
+      request.onsuccess = () => resolve(request.result);
+    });
+  }
+
+  function deleteMemberFromDB(id) {
+    return new Promise((resolve) => {
+      const tx = db.transaction(STORE_MEMBERS, 'readwrite');
+      tx.objectStore(STORE_MEMBERS).delete(id);
+      tx.oncomplete = () => resolve();
+    });
+  }
+
+  // Members created before the LHDN/IRAS toggle existed default to both enabled.
+  function memberTaxTypes(member) {
+    return (member && member.taxTypes) ? member.taxTypes : { lhdn: true, iras: true };
+  }
+
+  // ============================================================
+  // LHDN Record DB Methods (encrypted at rest — id & memberId stay in the
+  // clear so the memberId index keeps working; everything else is encrypted)
+  // ============================================================
+  function getRecordsByMember(memberId) {
+    return new Promise((resolve) => {
+      const tx = db.transaction(STORE_RECORDS, 'readonly');
+      const store = tx.objectStore(STORE_RECORDS);
+      const index = store.index('memberId');
+      const request = index.getAll(memberId);
+      request.onsuccess = async () => {
+        const raw = request.result || [];
+        const decrypted = await Promise.all(raw.map(async row => {
+          const payload = await decryptObject(row.encData);
+          return { id: row.id, memberId: row.memberId, ...payload };
+        }));
+        resolve(decrypted);
+      };
+    });
+  }
+
+  function getAllRecords() {
+    return new Promise((resolve) => {
+      const tx = db.transaction(STORE_RECORDS, 'readonly');
+      const store = tx.objectStore(STORE_RECORDS);
+      const request = store.getAll();
+      request.onsuccess = async () => {
+        const raw = request.result || [];
+        const decrypted = await Promise.all(raw.map(async row => {
+          const payload = await decryptObject(row.encData);
+          return { id: row.id, memberId: row.memberId, ...payload };
+        }));
+        resolve(decrypted);
+      };
+    });
+  }
+
+  async function saveRecordToDB(record) {
+    const { id, memberId, ...payload } = record;
+    const encData = await encryptObject(payload);
+    const toStore = { memberId, encData };
+    if (id !== undefined && id !== null) toStore.id = id;
+    return new Promise((resolve) => {
+      const tx = db.transaction(STORE_RECORDS, 'readwrite');
+      const store = tx.objectStore(STORE_RECORDS);
+      const request = store.put(toStore);
+      request.onsuccess = () => resolve(request.result);
+    });
+  }
+
+  function deleteRecordFromDB(id) {
+    return new Promise((resolve) => {
+      const tx = db.transaction(STORE_RECORDS, 'readwrite');
+      const store = tx.objectStore(STORE_RECORDS);
+      const request = store.delete(id);
+      request.onsuccess = () => resolve();
+    });
+  }
+
+  // ============================================================
+  // IRAS (Singapore) Record DB Methods (same encrypted-at-rest pattern)
+  // ============================================================
+  function getIrasRecordsByMember(memberId) {
+    return new Promise((resolve) => {
+      const tx = db.transaction(STORE_IRAS_RECORDS, 'readonly');
+      const store = tx.objectStore(STORE_IRAS_RECORDS);
+      const index = store.index('memberId');
+      const request = index.getAll(memberId);
+      request.onsuccess = async () => {
+        const raw = request.result || [];
+        const decrypted = await Promise.all(raw.map(async row => {
+          const payload = await decryptObject(row.encData);
+          return { id: row.id, memberId: row.memberId, ...payload };
+        }));
+        resolve(decrypted);
+      };
+    });
+  }
+
+  function getAllIrasRecords() {
+    return new Promise((resolve) => {
+      const tx = db.transaction(STORE_IRAS_RECORDS, 'readonly');
+      const store = tx.objectStore(STORE_IRAS_RECORDS);
+      const request = store.getAll();
+      request.onsuccess = async () => {
+        const raw = request.result || [];
+        const decrypted = await Promise.all(raw.map(async row => {
+          const payload = await decryptObject(row.encData);
+          return { id: row.id, memberId: row.memberId, ...payload };
+        }));
+        resolve(decrypted);
+      };
+    });
+  }
+
+  async function saveIrasRecordToDB(record) {
+    const { id, memberId, ...payload } = record;
+    const encData = await encryptObject(payload);
+    const toStore = { memberId, encData };
+    if (id !== undefined && id !== null) toStore.id = id;
+    return new Promise((resolve) => {
+      const tx = db.transaction(STORE_IRAS_RECORDS, 'readwrite');
+      const store = tx.objectStore(STORE_IRAS_RECORDS);
+      const request = store.put(toStore);
+      request.onsuccess = () => resolve(request.result);
+    });
+  }
+
+  function deleteIrasRecordFromDB(id) {
+    return new Promise((resolve) => {
+      const tx = db.transaction(STORE_IRAS_RECORDS, 'readwrite');
+      const store = tx.objectStore(STORE_IRAS_RECORDS);
+      const request = store.delete(id);
+      request.onsuccess = () => resolve();
+    });
+  }
+
+  async function deleteMemberCascade(memberId) {
+    const records = await getRecordsByMember(memberId);
+    for (const r of records) await deleteRecordFromDB(r.id);
+    const irasRecords = await getIrasRecordsByMember(memberId);
+    for (const r of irasRecords) await deleteIrasRecordFromDB(r.id);
+    await deleteMemberFromDB(memberId);
+  }
+
+  function clearAllData() {
+    return new Promise((resolve) => {
+      const tx = db.transaction([STORE_RECORDS, STORE_MEMBERS, STORE_IRAS_RECORDS], 'readwrite');
+      tx.objectStore(STORE_RECORDS).clear();
+      tx.objectStore(STORE_MEMBERS).clear();
+      tx.objectStore(STORE_IRAS_RECORDS).clear();
+      tx.oncomplete = () => resolve();
+    });
+  }
+
+  // ============================================================
+  // Export / Import JSON (optionally encrypted with its own backup passcode,
+  // independent of the app's own vault passcode — so a backup stays
+  // importable even after the app passcode is later changed)
+  // ============================================================
+  let pendingImportPayload = null; // holds a parsed *encrypted* backup awaiting its passcode
+
+  function openExportModal() {
+    document.getElementById('exportEncryptToggle').checked = true;
+    document.getElementById('exportPasscode').value = '';
+    document.getElementById('exportPasscodeConfirm').value = '';
+    document.getElementById('exportError').style.display = 'none';
+    updateExportModalView();
+    document.getElementById('exportModal').classList.add('open');
+  }
+
+  function closeExportModal() {
+    document.getElementById('exportModal').classList.remove('open');
+  }
+
+  function updateExportModalView() {
+    const encrypt = document.getElementById('exportEncryptToggle').checked;
+    document.getElementById('exportEncryptFields').style.display = encrypt ? 'block' : 'none';
+    document.getElementById('exportPlainWarning').style.display = encrypt ? 'none' : 'block';
+  }
+
+  function showExportError(msg) {
+    const el = document.getElementById('exportError');
+    el.textContent = msg;
+    el.style.display = 'block';
+  }
+
+  async function performExport() {
+    const encrypt = document.getElementById('exportEncryptToggle').checked;
+    document.getElementById('exportError').style.display = 'none';
+
+    const members = await getMembers();
+    const records = await getAllRecords();
+    const irasRecords = await getAllIrasRecords();
+
+    if (records.length === 0 && members.length === 0 && irasRecords.length === 0) {
+      showExportError('No tax records found to export.');
+      return;
+    }
+
+    let payload;
+
+    if (encrypt) {
+      const p1 = document.getElementById('exportPasscode').value;
+      const p2 = document.getElementById('exportPasscodeConfirm').value;
+      if (p1.length < 6) { showExportError('Backup passcode must be at least 6 characters.'); return; }
+      if (p1 !== p2) { showExportError('Backup passcodes do not match.'); return; }
+
+      const salt = bufToB64(crypto.getRandomValues(new Uint8Array(16)));
+      const backupKey = await deriveKeyFromPasscode(p1, salt, PBKDF2_ITERATIONS);
+      const enc = await encryptObject({ members, records, irasRecords }, backupKey);
+      payload = { encrypted: true, iterations: PBKDF2_ITERATIONS, salt, iv: enc.iv, ct: enc.ct };
+    } else {
+      payload = { encrypted: false, members, records, irasRecords };
+    }
+
+    const dataStr = "data:text/json;charset=utf-8," + encodeURIComponent(JSON.stringify(payload, null, 2));
+    const downloadAnchor = document.createElement('a');
+
+    const today = new Date().toISOString().split('T')[0];
+    downloadAnchor.setAttribute("href", dataStr);
+    downloadAnchor.setAttribute("download", `tax_records_backup_${today}${encrypt ? '_encrypted' : ''}.json`);
+    document.body.appendChild(downloadAnchor);
+    downloadAnchor.click();
+    downloadAnchor.remove();
+
+    closeExportModal();
+  }
+
+  async function importJSON(event) {
+    const file = event.target.files[0];
+    if (!file) return;
+
+    const reader = new FileReader();
+    reader.onload = async (e) => {
+      try {
+        const importedData = JSON.parse(e.target.result);
+
+        if (importedData.encrypted) {
+          pendingImportPayload = importedData;
+          document.getElementById('importBackupPasscode').value = '';
+          document.getElementById('importPasscodeError').style.display = 'none';
+          document.getElementById('importPasscodeModal').classList.add('open');
+          return;
+        }
+
+        if (!importedData.members || !importedData.records) {
+          alert("Invalid backup format.");
+          return;
+        }
+
+        await applyImportedData(importedData);
+      } catch (err) {
+        alert("Failed to parse JSON backup file.");
+        console.error(err);
+      }
+    };
+
+    reader.readAsText(file);
+    event.target.value = '';
+  }
+
+  function closeImportPasscodeModal() {
+    document.getElementById('importPasscodeModal').classList.remove('open');
+    pendingImportPayload = null;
+  }
+
+  async function decryptAndImport() {
+    const passcode = document.getElementById('importBackupPasscode').value;
+    const errEl = document.getElementById('importPasscodeError');
+    errEl.style.display = 'none';
+
+    try {
+      const key = await deriveKeyFromPasscode(passcode, pendingImportPayload.salt, pendingImportPayload.iterations || PBKDF2_ITERATIONS);
+      const decrypted = await decryptObject({ iv: pendingImportPayload.iv, ct: pendingImportPayload.ct }, key);
+
+      if (!decrypted.members || !decrypted.records) {
+        errEl.textContent = 'Invalid backup contents.';
+        errEl.style.display = 'block';
+        return;
+      }
+
+      const dataToImport = decrypted;
+      closeImportPasscodeModal();
+      await applyImportedData(dataToImport);
+    } catch (err) {
+      errEl.textContent = 'Incorrect backup passcode, or corrupted file.';
+      errEl.style.display = 'block';
+    }
+  }
+
+  async function applyImportedData(importedData) {
+    if (confirm("Overwriting existing data with imported backup. Proceed?")) {
+      await clearAllData();
+
+      // Preserve original IDs on import — records reference members by
+      // memberId, so re-adding members with saveMember() (which always
+      // generates a brand-new ID) would silently orphan every record.
+      for (const m of importedData.members) {
+        await updateMemberInDB({ id: m.id, name: m.name, taxTypes: m.taxTypes || { lhdn: true, iras: true } });
+      }
+      for (const r of importedData.records) {
+        await saveRecordToDB(r);
+      }
+      for (const r of (importedData.irasRecords || [])) {
+        await saveIrasRecordToDB(r);
+      }
+
+      alert("Import completed successfully!");
+      backToOverview();
+      await initApp();
+    }
+  }
+
+  // ============================================================
+  // DOM Elements
+  // ============================================================
+  const taxForm = document.getElementById('taxForm');
+  const incomeSourcesContainer = document.getElementById('incomeSourcesContainer');
+  const addSourceBtn = document.getElementById('addSourceBtn');
+  const recordsTableBody = document.getElementById('recordsTableBody');
+  const companyReportBody = document.getElementById('companyReportBody');
+  const companyDatalist = document.getElementById('companyList');
+  const editingBanner = document.getElementById('editingBanner');
+  const editingYearText = document.getElementById('editingYearText');
+  const cancelEditBtn = document.getElementById('cancelEditBtn');
+  const formTitle = document.getElementById('formTitle');
+  const submitBtn = document.getElementById('submitBtn');
+  const incomeDeclaredInput = document.getElementById('incomeDeclared');
+  const incomeDeclaredDiff = document.getElementById('incomeDeclaredDiff');
+
+  const irasForm = document.getElementById('irasForm');
+  const irasTableBody = document.getElementById('irasTableBody');
+  const editingIrasBanner = document.getElementById('editingIrasBanner');
+  const editingIrasYearText = document.getElementById('editingIrasYearText');
+  const cancelIrasEditBtn = document.getElementById('cancelIrasEditBtn');
+  const irasFormTitle = document.getElementById('irasFormTitle');
+  const irasSubmitBtn = document.getElementById('irasSubmitBtn');
+
+  const overviewView = document.getElementById('overviewView');
+  const ledgerView = document.getElementById('ledgerView');
+  const overviewCardsGrid = document.getElementById('overviewCardsGrid');
+  const ownerFilter = document.getElementById('ownerFilter');
+
+  addSourceBtn.addEventListener('click', () => { addSourceRow(); updateIncomeDeclaredPreview(); });
+
+  function sumSourceAmounts() {
+    let total = 0;
+    document.querySelectorAll('.source-amount').forEach(input => {
+      total += parseFloat(input.value) || 0;
+    });
+    return total;
+  }
+
+  // Live preview: shows over/under-declared amount as soon as a manual
+  // Income Declaration is keyed in that differs from the sum of income sources.
+  function updateIncomeDeclaredPreview() {
+    const raw = incomeDeclaredInput.value;
+    const sourceTotal = sumSourceAmounts();
+
+    if (raw === '') {
+      incomeDeclaredDiff.style.display = 'none';
+      incomeDeclaredDiff.textContent = '';
+      return;
+    }
+
+    const declared = parseFloat(raw) || 0;
+    const diff = declared - sourceTotal;
+
+    if (Math.abs(diff) < 0.005) {
+      incomeDeclaredDiff.style.display = 'none';
+      incomeDeclaredDiff.textContent = '';
+      return;
+    }
+
+    const label = diff > 0 ? 'Over-declared' : 'Under-declared';
+    incomeDeclaredDiff.textContent = `${label} vs. income sources by ${formatCurrency(Math.abs(diff), 'MYR')}`;
+    incomeDeclaredDiff.style.display = 'block';
+  }
+
+  incomeDeclaredInput.addEventListener('input', updateIncomeDeclaredPreview);
+  incomeSourcesContainer.addEventListener('input', (e) => {
+    if (e.target.classList.contains('source-amount')) updateIncomeDeclaredPreview();
+  });
+
+  function addSourceRow(name = '', amount = '') {
+    const row = document.createElement('div');
+    row.className = 'income-source-row';
+    row.innerHTML = `
+      <input type="text" list="companyList" placeholder="Company Name" class="source-name" value="${escapeHtml(name)}">
+      <input type="number" step="0.01" placeholder="Amount (RM)" class="source-amount" value="${escapeHtml(amount)}">
+      <button type="button" class="btn btn-secondary" data-action="remove-source-row">X</button>
+    `;
+    incomeSourcesContainer.appendChild(row);
+  }
+
+  function removeSourceRow(btn) {
+    btn.parentElement.remove();
+    updateIncomeDeclaredPreview();
+  }
+
+  // Basic HTML escaping to avoid broken markup / injection when names contain
+  // special characters (<, >, quotes, etc.) since values are inserted via innerHTML.
+  function escapeHtml(str) {
+    return String(str)
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#39;');
+  }
+
+  function formatCurrency(val, currency = 'MYR') {
+    if (val === null || val === undefined || isNaN(val)) return '-';
+    const prefix = currency === 'SGD' ? 'S$' : 'RM';
+    return prefix + ' ' + val.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  }
+
+  // ============================================================
+  // Lock / Unlock / Passcode Setup Flow
+  // ============================================================
+  function showLockError(msg) {
+    const el = document.getElementById('lockError');
+    el.textContent = msg;
+    el.style.display = 'block';
+  }
+
+  function clearLockError() {
+    const el = document.getElementById('lockError');
+    el.textContent = '';
+    el.style.display = 'none';
+  }
+
+  function showLockScreen(mode) {
+    document.getElementById('lockScreen').style.display = 'flex';
+    document.getElementById('appContainer').style.display = 'none';
+    document.getElementById('lockSetupView').style.display = mode === 'setup' ? 'block' : 'none';
+    document.getElementById('lockUnlockView').style.display = mode === 'unlock' ? 'block' : 'none';
+    clearLockError();
+    document.getElementById('setupPasscode').value = '';
+    document.getElementById('setupPasscodeConfirm').value = '';
+    document.getElementById('unlockPasscode').value = '';
+    if (mode === 'unlock') {
+      setTimeout(() => document.getElementById('unlockPasscode').focus(), 50);
+    } else {
+      setTimeout(() => document.getElementById('setupPasscode').focus(), 50);
+    }
+  }
+
+  function showApp() {
+    document.getElementById('lockScreen').style.display = 'none';
+    document.getElementById('appContainer').style.display = 'flex';
+  }
+
+  async function handleSetupPasscode() {
+    const p1 = document.getElementById('setupPasscode').value;
+    const p2 = document.getElementById('setupPasscodeConfirm').value;
+    clearLockError();
+
+    if (p1.length < 6) { showLockError('Passcode must be at least 6 characters.'); return; }
+    if (p1 !== p2) { showLockError('Passcodes do not match.'); return; }
+
+    try {
+      const salt = bufToB64(crypto.getRandomValues(new Uint8Array(16)));
+      vaultKey = await deriveKeyFromPasscode(p1, salt, PBKDF2_ITERATIONS);
+      const verify = await encryptObject(VAULT_CHECK_STRING);
+      await saveVaultMeta({ salt, verify, iterations: PBKDF2_ITERATIONS });
+
+      // Encrypt any pre-existing plaintext data from before this feature existed.
+      await migrateLegacyDataToEncrypted();
+
+      showApp();
+      await initApp();
+    } catch (err) {
+      console.error(err);
+      vaultKey = null;
+      showLockError('Failed to set up encryption. Please try again.');
+    }
+  }
+
+  async function handleUnlock() {
+    const passcode = document.getElementById('unlockPasscode').value;
+    clearLockError();
+
+    try {
+      const meta = await getVaultMeta();
+      if (!meta) { showLockError('No passcode has been set up yet.'); return; }
+
+      const key = await verifyPasscode(passcode, meta);
+      if (!key) { showLockError('Incorrect passcode. Please try again.'); return; }
+
+      vaultKey = key;
+      showApp();
+      await initApp();
+    } catch (err) {
+      console.error(err);
+      showLockError('Something went wrong while unlocking. Please try again.');
+    }
+  }
+
+  function lockApp() {
+    vaultKey = null;
+    currentMemberId = null;
+    ledgerMemberId = null;
+    ledgerType = null;
+    currentMemberBirthYear = null;
+    document.getElementById('ledgerView').style.display = 'none';
+    document.getElementById('overviewView').style.display = 'block';
+    showLockScreen('unlock');
+  }
+
+  function openChangePasscodeModal() {
+    document.getElementById('currentPasscodeInput').value = '';
+    document.getElementById('newPasscodeInput').value = '';
+    document.getElementById('newPasscodeConfirmInput').value = '';
+    document.getElementById('changePasscodeError').style.display = 'none';
+    document.getElementById('changePasscodeModal').classList.add('open');
+  }
+
+  function closeChangePasscodeModal() {
+    document.getElementById('changePasscodeModal').classList.remove('open');
+  }
+
+  async function handleChangePasscode() {
+    const current = document.getElementById('currentPasscodeInput').value;
+    const next = document.getElementById('newPasscodeInput').value;
+    const confirmNext = document.getElementById('newPasscodeConfirmInput').value;
+    const errEl = document.getElementById('changePasscodeError');
+    errEl.style.display = 'none';
+
+    const showErr = (msg) => { errEl.textContent = msg; errEl.style.display = 'block'; };
+
+    if (next.length < 6) { showErr('New passcode must be at least 6 characters.'); return; }
+    if (next !== confirmNext) { showErr('New passcodes do not match.'); return; }
+
+    const changeBtn = document.getElementById('changePasscodeBtn');
+    changeBtn.disabled = true;
+    changeBtn.textContent = 'Updating…';
+
+    try {
+      const meta = await getVaultMeta();
+      const testKey = await verifyPasscode(current, meta);
+      if (!testKey) { showErr('Current passcode is incorrect.'); return; }
+
+      // Decrypt everything under the old key first (via the normal, already-
+      // decryption-aware getters, since vaultKey is still the old key here).
+      const members = await getMembers();
+      const records = await getAllRecords();
+      const irasRecords = await getAllIrasRecords();
+
+      // Derive the new key, then re-encrypt every row under it.
+      const newSalt = bufToB64(crypto.getRandomValues(new Uint8Array(16)));
+      const newKey = await deriveKeyFromPasscode(next, newSalt, PBKDF2_ITERATIONS);
+
+      vaultKey = newKey;
+      for (const m of members) await updateMemberInDB(m);
+      for (const r of records) await saveRecordToDB(r);
+      for (const r of irasRecords) await saveIrasRecordToDB(r);
+
+      const verify = await encryptObject(VAULT_CHECK_STRING);
+      await saveVaultMeta({ salt: newSalt, verify, iterations: PBKDF2_ITERATIONS });
+
+      closeChangePasscodeModal();
+      alert('Passcode updated successfully.');
+    } catch (err) {
+      console.error(err);
+      showErr('Failed to update passcode. Please try again.');
+    } finally {
+      changeBtn.disabled = false;
+      changeBtn.textContent = 'Update Passcode';
+    }
+  }
+
+  // ============================================================
+  // App Init / Overview
+  // ============================================================
+  async function initApp() {
+    let members = await getMembers();
+    if (members.length === 0) {
+      await saveMember("Husband", { lhdn: true, iras: true });
+      await saveMember("Wife", { lhdn: true, iras: true });
+    }
+    await populateOwnerFilter();
+    await renderOverviewCards();
+  }
+
+  async function populateOwnerFilter() {
+    const members = await getMembers();
+    const prevVal = ownerFilter.value || 'all';
+    ownerFilter.innerHTML = `<option value="all">All Owners</option>` +
+      members.map(m => `<option value="${m.id}">${escapeHtml(m.name)}</option>`).join('');
+    ownerFilter.value = members.some(m => String(m.id) === prevVal) ? prevVal : 'all';
+  }
+
+  function computeLhdnTotals(records) {
+    let netIncome = 0, taxPaid = 0, declaredIncome = 0;
+    records.forEach(r => {
+      const hasIncomeAdj = (r.lhdnAdjustedIncome !== null && r.lhdnAdjustedIncome !== undefined);
+      const hasTaxAdj = (r.lhdnAdjustedTax !== null && r.lhdnAdjustedTax !== undefined);
+      const effIncome = hasIncomeAdj ? r.lhdnAdjustedIncome : (r.incomeDeclared || 0);
+      const effTax = hasTaxAdj ? r.lhdnAdjustedTax : (r.taxAmount || 0);
+
+      netIncome += (effIncome - effTax);
+      taxPaid += effTax;
+      declaredIncome += effIncome;
+    });
+    return { netIncome, taxPaid, declaredIncome };
+  }
+
+  function computeIrasTotals(irasRecords) {
+    let taxPaid = 0, totalIncome = 0;
+    irasRecords.forEach(r => {
+      taxPaid += (r.taxPayment || 0);
+      totalIncome += (r.noaIncome || 0);
+    });
+    return { taxPaid, totalIncome, netIncome: totalIncome - taxPaid, count: irasRecords.length };
+  }
+
+  async function renderOverviewCards() {
+    const members = await getMembers();
+    const filterVal = ownerFilter.value || 'all';
+    const filteredMembers = filterVal === 'all' ? members : members.filter(m => String(m.id) === filterVal);
+
+    let cardsHtml = '';
+
+    for (const m of filteredMembers) {
+      const types = memberTaxTypes(m);
+
+      if (types.lhdn) {
+        const records = await getRecordsByMember(m.id);
+        const totals = computeLhdnTotals(records);
+        cardsHtml += `
+          <div class="member-card lhdn-card" data-action="open-ledger" data-id="${m.id}" data-type="lhdn">
+            <div class="member-card-badge">LHDN · Malaysia</div>
+            <div class="member-card-name">${escapeHtml(m.name)}</div>
+            <div class="member-card-stats">
+              <div>Total Income: <strong style="color: #1d4ed8;">${formatCurrency(totals.declaredIncome, 'MYR')}</strong></div>
+              <div>Total Tax Paid: <strong style="color: var(--danger);">${formatCurrency(totals.taxPaid, 'MYR')}</strong></div>
+              <div>Net Income: <strong style="color: var(--success);">${formatCurrency(totals.netIncome, 'MYR')}</strong></div>
+            </div>
+          </div>
+        `;
+      }
+
+      if (types.iras) {
+        const irasRecords = await getIrasRecordsByMember(m.id);
+        const totals = computeIrasTotals(irasRecords);
+        cardsHtml += `
+          <div class="member-card iras-card" data-action="open-ledger" data-id="${m.id}" data-type="iras">
+            <div class="member-card-badge">IRAS · Singapore</div>
+            <div class="member-card-name">${escapeHtml(m.name)}</div>
+            <div class="member-card-stats">
+              <div>Total Income: <strong style="color: #1d4ed8;">${formatCurrency(totals.totalIncome, 'SGD')}</strong></div>
+              <div>Total Tax Paid: <strong style="color: var(--danger);">${formatCurrency(totals.taxPaid, 'SGD')}</strong></div>
+              <div>Net Income: <strong style="color: var(--success);">${formatCurrency(totals.netIncome, 'SGD')}</strong></div>
+            </div>
+          </div>
+        `;
+      }
+    }
+
+    overviewCardsGrid.innerHTML = cardsHtml ||
+      `<div class="empty-state">No members yet. Click "👥 Members" above to add one.</div>`;
+  }
+
+  // ============================================================
+  // Ledger Navigation
+  // ============================================================
+  async function openLedger(memberId, type, opts = {}) {
+    ledgerMemberId = memberId;
+    ledgerType = type;
+    currentMemberId = memberId;
+
+    overviewView.style.display = 'none';
+    ledgerView.style.display = 'block';
+
+    const members = await getMembers();
+    const member = members.find(m => m.id === memberId);
+    document.getElementById('ledgerMemberName').textContent = member ? member.name : '';
+    currentMemberBirthYear = (member && member.birthYear) ? member.birthYear : null;
+
+    const badge = document.getElementById('ledgerTypeBadge');
+    if (type === 'lhdn') {
+      badge.textContent = 'LHDN (Malaysia) · RM';
+      badge.className = 'badge badge-lhdn';
+    } else {
+      badge.textContent = 'IRAS (Singapore) · S$';
+      badge.className = 'badge badge-iras';
+    }
+
+    document.getElementById('ledgerLhdnContent').style.display = (type === 'lhdn') ? 'block' : 'none';
+    document.getElementById('ledgerIrasContent').style.display = (type === 'iras') ? 'block' : 'none';
+
+    resetForm();
+    resetIrasForm();
+    collapseEntryForms();
+
+    await refreshApp();
+
+    if (opts.autoExpandForm) {
+      if (type === 'lhdn') toggleLhdnForm(true);
+      else toggleIrasForm(true);
+    }
+
+    window.scrollTo({ top: 0, behavior: 'instant' });
+  }
+
+  async function backToOverview() {
+    ledgerView.style.display = 'none';
+    overviewView.style.display = 'block';
+    await populateOwnerFilter();
+    await renderOverviewCards();
+  }
+
+  function toggleLhdnForm(forceOpen) {
+    const wrapper = document.getElementById('lhdnFormWrapper');
+    const isOpen = wrapper.style.display === 'block';
+    const shouldOpen = forceOpen !== undefined ? forceOpen : !isOpen;
+    wrapper.style.display = shouldOpen ? 'block' : 'none';
+    document.getElementById('toggleLhdnFormBtn').textContent = shouldOpen ? '▲ Hide Entry Form' : '+ Add New Entry';
+  }
+
+  function toggleIrasForm(forceOpen) {
+    const wrapper = document.getElementById('irasFormWrapper');
+    const isOpen = wrapper.style.display === 'block';
+    const shouldOpen = forceOpen !== undefined ? forceOpen : !isOpen;
+    wrapper.style.display = shouldOpen ? 'block' : 'none';
+    document.getElementById('toggleIrasFormBtn').textContent = shouldOpen ? '▲ Hide Entry Form' : '+ Add New Entry';
+  }
+
+  function collapseEntryForms() {
+    document.getElementById('lhdnFormWrapper').style.display = 'none';
+    document.getElementById('toggleLhdnFormBtn').textContent = '+ Add New Entry';
+    document.getElementById('irasFormWrapper').style.display = 'none';
+    document.getElementById('toggleIrasFormBtn').textContent = '+ Add New Entry';
+  }
+
+  function printCurrentView() {
+    window.print();
+  }
+
+  // ============================================================
+  // Members Modal
+  // ============================================================
+  async function openMembersModal() {
+    await renderMembersModalList();
+    document.getElementById('membersModal').classList.add('open');
+  }
+
+  async function closeMembersModal() {
+    document.getElementById('membersModal').classList.remove('open');
+    await populateOwnerFilter();
+    await renderOverviewCards();
+  }
+
+  async function renderMembersModalList() {
+    const members = await getMembers();
+    const listEl = document.getElementById('membersModalList');
+
+    if (members.length === 0) {
+      listEl.innerHTML = `<p style="color: var(--text-muted);">No members yet — add one below.</p>`;
+      return;
+    }
+
+    listEl.innerHTML = members.map(m => {
+      const t = memberTaxTypes(m);
+      return `
+        <div class="member-row">
+          <input type="text" value="${escapeHtml(m.name)}" id="memberName_${m.id}">
+          <input type="number" value="${m.birthYear || ''}" id="memberBirthYear_${m.id}" placeholder="Birth year" style="width: 110px;">
+          <label><input type="checkbox" id="memberLhdn_${m.id}" ${t.lhdn ? 'checked' : ''}> LHDN</label>
+          <label><input type="checkbox" id="memberIras_${m.id}" ${t.iras ? 'checked' : ''}> IRAS</label>
+          <button class="btn btn-secondary" data-action="save-member-edits" data-id="${m.id}">Save</button>
+          <button class="icon-btn delete" title="Delete Member" data-action="delete-member-entirely" data-id="${m.id}">
+            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+            </svg>
+          </button>
+        </div>
+      `;
+    }).join('');
+  }
+
+  async function saveMemberEdits(id) {
+    const name = document.getElementById(`memberName_${id}`).value.trim();
+    const birthYearVal = document.getElementById(`memberBirthYear_${id}`).value;
+    const birthYear = birthYearVal !== '' ? parseInt(birthYearVal, 10) : null;
+    const lhdn = document.getElementById(`memberLhdn_${id}`).checked;
+    const iras = document.getElementById(`memberIras_${id}`).checked;
+
+    if (!name) { alert('Name cannot be empty.'); return; }
+    if (!lhdn && !iras) { alert('Select at least one tax type: LHDN or IRAS.'); return; }
+
+    await updateMemberInDB({ id, name, taxTypes: { lhdn, iras }, birthYear });
+    await renderMembersModalList();
+
+    // If this member's Ledger is currently open, refresh the cached birth
+    // year so any Age column updates immediately without needing to re-open.
+    if (ledgerMemberId === id) {
+      currentMemberBirthYear = birthYear;
+      await refreshApp();
+    }
+  }
+
+  async function deleteMemberEntirely(id) {
+    const members = await getMembers();
+    const member = members.find(m => m.id === id);
+    const label = member ? member.name : 'this member';
+
+    if (!confirm(`Delete "${label}" and ALL their LHDN & IRAS records? This cannot be undone.`)) return;
+
+    await deleteMemberCascade(id);
+
+    if (currentMemberId === id) currentMemberId = null;
+    if (ledgerMemberId === id) await backToOverview();
+
+    await renderMembersModalList();
+    await populateOwnerFilter();
+    await renderOverviewCards();
+  }
+
+  async function addMemberFromModal() {
+    const name = document.getElementById('newMemberName').value.trim();
+    const birthYearVal = document.getElementById('newMemberBirthYear').value;
+    const birthYear = birthYearVal !== '' ? parseInt(birthYearVal, 10) : null;
+    const lhdn = document.getElementById('newMemberLhdn').checked;
+    const iras = document.getElementById('newMemberIras').checked;
+
+    if (!name) { alert('Please enter a name.'); return; }
+    if (!lhdn && !iras) { alert('Select at least one tax type: LHDN or IRAS.'); return; }
+
+    await saveMember(name, { lhdn, iras }, birthYear);
+
+    document.getElementById('newMemberName').value = '';
+    document.getElementById('newMemberBirthYear').value = '';
+    document.getElementById('newMemberLhdn').checked = true;
+    document.getElementById('newMemberIras').checked = true;
+
+    await renderMembersModalList();
+    await populateOwnerFilter();
+    await renderOverviewCards();
+  }
+
+  // ============================================================
+  // Quick Add Modal
+  // ============================================================
+  async function openQuickAddModal() {
+    const members = await getMembers();
+    if (members.length === 0) {
+      alert('Please add a member first via "👥 Members".');
+      return;
+    }
+    const memberSelect = document.getElementById('quickAddMember');
+    memberSelect.innerHTML = members.map(m => `<option value="${m.id}">${escapeHtml(m.name)}</option>`).join('');
+    await updateQuickAddTypeOptions();
+    document.getElementById('quickAddModal').classList.add('open');
+  }
+
+  async function updateQuickAddTypeOptions() {
+    const members = await getMembers();
+    const memberId = parseInt(document.getElementById('quickAddMember').value, 10);
+    const member = members.find(m => m.id === memberId);
+    const t = memberTaxTypes(member);
+
+    const opts = [];
+    if (t.lhdn) opts.push('<option value="lhdn">LHDN (Malaysia)</option>');
+    if (t.iras) opts.push('<option value="iras">IRAS (Singapore)</option>');
+
+    document.getElementById('quickAddType').innerHTML = opts.join('') || '<option value="">No tax types enabled</option>';
+  }
+
+  function closeQuickAddModal() {
+    document.getElementById('quickAddModal').classList.remove('open');
+  }
+
+  async function quickAddGo() {
+    const memberId = parseInt(document.getElementById('quickAddMember').value, 10);
+    const type = document.getElementById('quickAddType').value;
+
+    if (!type) { alert('This member has no tax types enabled. Edit them via "👥 Members" first.'); return; }
+
+    closeQuickAddModal();
+    await openLedger(memberId, type, { autoExpandForm: true });
+  }
+
+  // ============================================================
+  // LHDN Form Submit Handler
+  // ============================================================
+  taxForm.addEventListener('submit', async (e) => {
+    e.preventDefault();
+
+    const recordId = document.getElementById('recordId').value;
+    const yearWorking = parseInt(document.getElementById('yearWorking').value, 10);
+
+    const yearSubmitVal = document.getElementById('yearSubmit').value;
+    const tahunTaksiranVal = document.getElementById('tahunTaksiran').value;
+    const taxAmountVal = document.getElementById('taxAmount').value;
+    const incomeDeclaredVal = document.getElementById('incomeDeclared').value;
+
+    const yearSubmit = yearSubmitVal !== '' ? parseInt(yearSubmitVal, 10) : null;
+    const tahunTaksiran = tahunTaksiranVal !== '' ? parseInt(tahunTaksiranVal, 10) : null;
+    const taxAmount = taxAmountVal !== '' ? parseFloat(taxAmountVal) : null;
+
+    const lhdnYearVal = document.getElementById('lhdnYear').value;
+    const lhdnAdjustedIncomeVal = document.getElementById('lhdnAdjustedIncome').value;
+    const lhdnAdjustedTaxVal = document.getElementById('lhdnAdjustedTax').value;
+
+    const lhdnYear = lhdnYearVal !== '' ? parseInt(lhdnYearVal, 10) : null;
+    const lhdnAdjustedIncome = lhdnAdjustedIncomeVal !== '' ? parseFloat(lhdnAdjustedIncomeVal) : null;
+    const lhdnAdjustedTax = lhdnAdjustedTaxVal !== '' ? parseFloat(lhdnAdjustedTaxVal) : null;
+
+    const sources = [];
+    let totalDerivedIncome = 0;
+
+    const names = document.querySelectorAll('.source-name');
+    const amounts = document.querySelectorAll('.source-amount');
+
+    names.forEach((input, index) => {
+      const name = input.value.trim();
+      const amount = parseFloat(amounts[index].value) || 0;
+      if (name) {
+        sources.push({ name, amount });
+        totalDerivedIncome += amount;
+      }
+    });
+
+    // Income sources are no longer strictly required — a record can consist of
+    // just an LHDN adjustment (e.g. logging a reassessment with no separate
+    // income source for that year). Require at least one of the two.
+    const hasLhdnData = (lhdnYear !== null) || (lhdnAdjustedIncome !== null) || (lhdnAdjustedTax !== null);
+    if (sources.length === 0 && !hasLhdnData) {
+      alert('Please add at least one income source, or fill in an LHDN Adjustment.');
+      return;
+    }
+
+    // Income Declaration: auto-uses the sum of Income Sources unless the user
+    // manually keys in a different declared amount (over/under-declare case).
+    let incomeDeclared;
+    let incomeDeclaredManual = false;
+    let incomeVsSourceDiff = 0;
+
+    if (incomeDeclaredVal === '') {
+      incomeDeclared = totalDerivedIncome;
+    } else {
+      incomeDeclared = parseFloat(incomeDeclaredVal) || 0;
+      incomeVsSourceDiff = incomeDeclared - totalDerivedIncome;
+      incomeDeclaredManual = Math.abs(incomeVsSourceDiff) >= 0.005;
+    }
+
+    const incomeAfterTax = incomeDeclared - (taxAmount || 0);
+
+    const record = {
+      memberId: currentMemberId,
+      yearWorking,
+      yearSubmit,
+      tahunTaksiran,
+      sources,
+      totalDerivedIncome,
+      incomeDeclared,
+      incomeDeclaredManual,
+      incomeVsSourceDiff,
+      taxAmount,
+      incomeAfterTax,
+      lhdnYear,
+      lhdnAdjustedIncome,
+      lhdnAdjustedTax
+    };
+
+    if (recordId) {
+      record.id = parseInt(recordId, 10);
+    }
+
+    await saveRecordToDB(record);
+    resetForm();
+    await refreshApp();
+  });
+
+  // ============================================================
+  // IRAS Form Submit Handler
+  // ============================================================
+  irasForm.addEventListener('submit', async (e) => {
+    e.preventDefault();
+
+    const irasRecordId = document.getElementById('irasRecordId').value;
+    const irasYearWorking = parseInt(document.getElementById('irasYearWorking').value, 10);
+
+    const irasYearSubmitVal = document.getElementById('irasYearSubmit').value;
+    const irasNoaVal = document.getElementById('irasNoa').value.trim();
+    const irasNoaIncomeVal = document.getElementById('irasNoaIncome').value;
+    const irasTaxPaymentVal = document.getElementById('irasTaxPayment').value;
+
+    const irasYearSubmit = irasYearSubmitVal !== '' ? parseInt(irasYearSubmitVal, 10) : null;
+    const irasNoa = irasNoaVal !== '' ? irasNoaVal : null;
+    const irasNoaIncome = irasNoaIncomeVal !== '' ? parseFloat(irasNoaIncomeVal) : null;
+    const irasTaxPayment = irasTaxPaymentVal !== '' ? parseFloat(irasTaxPaymentVal) : null;
+
+    const irasRecord = {
+      memberId: currentMemberId,
+      yearWorking: irasYearWorking,
+      yearSubmit: irasYearSubmit,
+      noa: irasNoa,
+      noaIncome: irasNoaIncome,
+      taxPayment: irasTaxPayment
+    };
+
+    if (irasRecordId) {
+      irasRecord.id = parseInt(irasRecordId, 10);
+    }
+
+    await saveIrasRecordToDB(irasRecord);
+    resetIrasForm();
+    await refreshApp();
+  });
+
+  async function editIrasRecord(id) {
+    const irasRecords = await getIrasRecordsByMember(currentMemberId);
+    const record = irasRecords.find(r => r.id === id);
+    if (!record) return;
+
+    document.getElementById('irasRecordId').value = record.id;
+    document.getElementById('irasYearWorking').value = record.yearWorking;
+    document.getElementById('irasYearSubmit').value = record.yearSubmit !== null && record.yearSubmit !== undefined ? record.yearSubmit : '';
+    document.getElementById('irasNoa').value = record.noa || '';
+    document.getElementById('irasNoaIncome').value = record.noaIncome !== null && record.noaIncome !== undefined ? record.noaIncome : '';
+    document.getElementById('irasTaxPayment').value = record.taxPayment !== null && record.taxPayment !== undefined ? record.taxPayment : '';
+
+    irasFormTitle.textContent = 'Edit IRAS (Singapore) Tax Entry';
+    irasSubmitBtn.textContent = 'Update IRAS Record';
+    editingIrasYearText.textContent = record.yearWorking;
+    editingIrasBanner.style.display = 'block';
+    cancelIrasEditBtn.style.display = 'inline-block';
+
+    toggleIrasForm(true);
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  }
+
+  async function deleteIrasRecord(id) {
+    if (confirm('Are you sure you want to delete this IRAS record?')) {
+      await deleteIrasRecordFromDB(id);
+      await refreshApp();
+    }
+  }
+
+  function resetIrasForm() {
+    irasForm.reset();
+    document.getElementById('irasRecordId').value = '';
+    irasFormTitle.textContent = 'Add IRAS (Singapore) Tax Entry';
+    irasSubmitBtn.textContent = 'Save IRAS Record';
+    editingIrasBanner.style.display = 'none';
+    cancelIrasEditBtn.style.display = 'none';
+  }
+
+  async function editRecord(id) {
+    const records = await getRecordsByMember(currentMemberId);
+    const record = records.find(r => r.id === id);
+    if (!record) return;
+
+    document.getElementById('recordId').value = record.id;
+    document.getElementById('yearWorking').value = record.yearWorking;
+    document.getElementById('yearSubmit').value = record.yearSubmit !== null && record.yearSubmit !== undefined ? record.yearSubmit : '';
+    document.getElementById('tahunTaksiran').value = record.tahunTaksiran !== null && record.tahunTaksiran !== undefined ? record.tahunTaksiran : '';
+    // Only re-populate Income Declaration if it was a manual key-in; otherwise
+    // leave blank so it continues to auto-derive from the income sources.
+    document.getElementById('incomeDeclared').value = record.incomeDeclaredManual ? record.incomeDeclared : '';
+    document.getElementById('taxAmount').value = record.taxAmount !== null && record.taxAmount !== undefined ? record.taxAmount : '';
+
+    document.getElementById('lhdnYear').value = record.lhdnYear || '';
+    document.getElementById('lhdnAdjustedIncome').value = record.lhdnAdjustedIncome !== null && record.lhdnAdjustedIncome !== undefined ? record.lhdnAdjustedIncome : '';
+    document.getElementById('lhdnAdjustedTax').value = record.lhdnAdjustedTax !== null && record.lhdnAdjustedTax !== undefined ? record.lhdnAdjustedTax : '';
+
+    incomeSourcesContainer.innerHTML = '';
+    record.sources.forEach(s => addSourceRow(s.name, s.amount));
+    updateIncomeDeclaredPreview();
+
+    formTitle.textContent = 'Edit Tax Record';
+    submitBtn.textContent = 'Update Record';
+    editingYearText.textContent = record.yearWorking;
+    editingBanner.style.display = 'block';
+    cancelEditBtn.style.display = 'inline-block';
+
+    toggleLhdnForm(true);
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  }
+
+  async function deleteRecord(id) {
+    if (confirm('Are you sure you want to delete this record?')) {
+      await deleteRecordFromDB(id);
+      await refreshApp();
+    }
+  }
+
+  function resetForm() {
+    taxForm.reset();
+    document.getElementById('recordId').value = '';
+    formTitle.textContent = 'Add Tax & Income Entry';
+    submitBtn.textContent = 'Save Record';
+    editingBanner.style.display = 'none';
+    cancelEditBtn.style.display = 'none';
+
+    incomeSourcesContainer.innerHTML = '';
+    addSourceRow();
+    updateIncomeDeclaredPreview();
+  }
+
+  // ============================================================
+  // Ledger Rendering
+  // ============================================================
+  async function refreshApp() {
+    let records = await getRecordsByMember(currentMemberId);
+    records.sort((a, b) => b.yearWorking - a.yearWorking);
+
+    let irasRecords = await getIrasRecordsByMember(currentMemberId);
+    irasRecords.sort((a, b) => b.yearWorking - a.yearWorking);
+
+    renderSummaryCards(records);
+    renderDatalist(records);
+    renderRecordsTable(records);
+    renderCompanyReport(records);
+    renderIrasSummary(irasRecords);
+    renderIrasTable(irasRecords);
+  }
+
+  function renderSummaryCards(records) {
+    const totals = computeLhdnTotals(records);
+    document.getElementById('summaryNetIncome').textContent = formatCurrency(totals.netIncome, 'MYR');
+    document.getElementById('summaryTaxPaid').textContent = formatCurrency(totals.taxPaid, 'MYR');
+  }
+
+  function renderIrasSummary(irasRecords) {
+    const totals = computeIrasTotals(irasRecords);
+    document.getElementById('irasSummaryNetIncome').textContent = formatCurrency(totals.netIncome, 'SGD');
+    document.getElementById('irasSummaryTotalIncome').textContent = formatCurrency(totals.totalIncome, 'SGD');
+    document.getElementById('irasSummaryTaxPaid').textContent = formatCurrency(totals.taxPaid, 'SGD');
+    document.getElementById('irasSummaryYears').textContent = totals.count;
+  }
+
+  function renderDatalist(records) {
+    const companies = new Set();
+    records.forEach(r => r.sources.forEach(s => companies.add(s.name.trim())));
+
+    companyDatalist.innerHTML = Array.from(companies)
+      .sort()
+      .map(company => `<option value="${escapeHtml(company)}">`)
+      .join('');
+  }
+
+  function renderRecordsTable(records) {
+    if (records.length === 0) {
+      recordsTableBody.innerHTML = `<tr><td colspan="8" style="text-align: center; color: var(--text-muted);">No records saved yet.</td></tr>`;
+      return;
+    }
+
+    recordsTableBody.innerHTML = records.map(r => {
+      const hasIncomeAdj = (r.lhdnAdjustedIncome !== null && r.lhdnAdjustedIncome !== undefined);
+      const hasTaxAdj = (r.lhdnAdjustedTax !== null && r.lhdnAdjustedTax !== undefined);
+      const hasLhdn = hasIncomeAdj || hasTaxAdj;
+      const lhdnYearStr = r.lhdnYear ? ` (Year ${r.lhdnYear})` : '';
+      const lhdnBadge = `<span class="badge badge-lhdn">LHDN Adj${lhdnYearStr}</span>`;
+
+      const sourcesList = r.sources.length > 0
+        ? r.sources.map(s => `<div><strong>${escapeHtml(s.name)}:</strong> ${formatCurrency(s.amount, 'MYR')}</div>`).join('')
+        : '';
+      const sourcesCell = [sourcesList, hasLhdn ? lhdnBadge : ''].filter(Boolean).join('<br>')
+        || '<span style="color: var(--text-muted);">-</span>';
+
+      const hasYearSubmit = (r.yearSubmit !== null && r.yearSubmit !== undefined && !isNaN(r.yearSubmit));
+      const hasTahunTaksiran = (r.tahunTaksiran !== null && r.tahunTaksiran !== undefined && !isNaN(r.tahunTaksiran));
+      const submitLine = hasYearSubmit ? `Submit: ${r.yearSubmit}` : '';
+      const yaBadge = hasTahunTaksiran ? `<span class="badge">YA ${r.tahunTaksiran}</span>` : '';
+      const submitYaCell = [submitLine, yaBadge].filter(Boolean).join('<br>')
+        || '<span style="color: var(--text-muted);">-</span>';
+
+      // LHDN Adjusted Income and Adjusted Tax each override independently —
+      // entering only one (e.g. just a corrected tax amount) still applies,
+      // falling back to the original declared income / tax for the other.
+      const effectiveDeclaredIncome = hasIncomeAdj ? r.lhdnAdjustedIncome : r.incomeDeclared;
+      const effectiveTaxPaid = hasTaxAdj ? r.lhdnAdjustedTax : r.taxAmount;
+      const effectiveNet = (effectiveDeclaredIncome || 0) - (effectiveTaxPaid || 0);
+
+      const taxAmountStr = (effectiveTaxPaid !== null && effectiveTaxPaid !== undefined) ? formatCurrency(effectiveTaxPaid, 'MYR') : '-';
+
+      // Over/under-declared note only applies to the original manual declaration
+      // vs. income sources — suppressed once an LHDN Income Adjustment overrides it.
+      const hasDiff = !hasIncomeAdj && r.incomeDeclaredManual && Math.abs(r.incomeVsSourceDiff || 0) >= 0.005;
+      const diffLabel = (r.incomeVsSourceDiff || 0) > 0 ? 'Over-declared' : 'Under-declared';
+      const declaredDiffHtml = hasDiff
+        ? `<br><small style="color: var(--warning); font-weight: 600;">${diffLabel} by ${formatCurrency(Math.abs(r.incomeVsSourceDiff), 'MYR')}</small>`
+        : '';
+
+      const ageStr = currentMemberBirthYear ? `<br><small style="color: var(--text-muted);">Age: ${r.yearWorking - currentMemberBirthYear}</small>` : '';
+
+      return `
+        <tr>
+          <td><strong>${r.yearWorking}</strong>${ageStr}</td>
+          <td>${submitYaCell}</td>
+          <td>${sourcesCell}</td>
+          <td><strong>${formatCurrency(r.totalDerivedIncome, 'MYR')}</strong></td>
+          <td><strong>${formatCurrency(effectiveDeclaredIncome, 'MYR')}</strong>${declaredDiffHtml}</td>
+          <td style="color: var(--danger);">${taxAmountStr}</td>
+          <td style="color: var(--success); font-weight: bold;">${formatCurrency(effectiveNet, 'MYR')}</td>
+          <td class="no-print">
+            <button class="icon-btn edit" title="Edit Record" data-action="edit-record" data-id="${r.id}">
+              <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path stroke-linecap="round" stroke-linejoin="round" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
+              </svg>
+            </button>
+            <button class="icon-btn delete" title="Delete Record" data-action="delete-record" data-id="${r.id}">
+              <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path stroke-linecap="round" stroke-linejoin="round" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+              </svg>
+            </button>
+          </td>
+        </tr>
+      `;
+    }).join('');
+  }
+
+  function renderCompanyReport(records) {
+    const companyMap = {};
+
+    records.forEach(r => {
+      r.sources.forEach(s => {
+        const company = s.name.trim();
+        const year = r.yearWorking;
+
+        if (!companyMap[company]) {
+          companyMap[company] = { years: {}, total: 0 };
+        }
+
+        companyMap[company].years[year] = (companyMap[company].years[year] || 0) + s.amount;
+        companyMap[company].total += s.amount;
+      });
+    });
+
+    // Sort by year range (earliest working year first), not alphabetically.
+    const companyNames = Object.keys(companyMap).sort((a, b) => {
+      const minYearA = Math.min(...Object.keys(companyMap[a].years).map(Number));
+      const minYearB = Math.min(...Object.keys(companyMap[b].years).map(Number));
+      return minYearA - minYearB;
+    });
+
+    const companyReportCards = document.getElementById('companyReportCards');
+
+    if (companyNames.length === 0) {
+      companyReportBody.innerHTML = `<tr><td colspan="4" style="text-align: center; color: var(--text-muted);">No records found.</td></tr>`;
+      companyReportCards.innerHTML = `<div class="empty-state">No records found.</div>`;
+      return;
+    }
+
+    companyReportBody.innerHTML = companyNames.map(company => {
+      const data = companyMap[company];
+      const years = Object.keys(data.years).map(Number).sort((a, b) => a - b);
+
+      const yearRange = years.length === 1
+        ? `${years[0]}`
+        : `${years[0]} - ${years[years.length - 1]}`;
+
+      const annualBreakdown = years.map(y => `<div><strong>${y}:</strong> ${formatCurrency(data.years[y], 'MYR')}</div>`).join('');
+
+      return `
+        <tr>
+          <td><strong>${escapeHtml(company)}</strong></td>
+          <td><span class="badge">${yearRange}</span></td>
+          <td>${annualBreakdown}</td>
+          <td><strong>${formatCurrency(data.total, 'MYR')}</strong></td>
+        </tr>
+      `;
+    }).join('');
+
+    // Card view: order by breakdown length (fewest years first) rather than
+    // earliest year, so a company with a long multi-decade history doesn't
+    // land in the middle of the grid and throw off the row alignment —
+    // it naturally sinks to the end instead. The table above keeps the
+    // chronological (earliest-year-first) order.
+    const cardOrder = [...companyNames].sort((a, b) => {
+      const lenA = Object.keys(companyMap[a].years).length;
+      const lenB = Object.keys(companyMap[b].years).length;
+      return lenA - lenB;
+    });
+
+    companyReportCards.innerHTML = cardOrder.map(company => {
+      const data = companyMap[company];
+      const years = Object.keys(data.years).map(Number).sort((a, b) => a - b);
+
+      const yearRange = years.length === 1
+        ? `${years[0]}`
+        : `${years[0]} - ${years[years.length - 1]}`;
+
+      const annualBreakdown = years.map(y => `<div><strong>${y}:</strong> ${formatCurrency(data.years[y], 'MYR')}</div>`).join('');
+
+      // Long-spanning companies get a wider card and a multi-column
+      // breakdown instead of one long vertical list of years.
+      let wideClass = '', columnClass = '';
+      if (years.length > 20) { wideClass = 'wide-3'; columnClass = 'multi-col-3'; }
+      else if (years.length > 10) { wideClass = 'wide-2'; columnClass = 'multi-col-2'; }
+
+      return `
+        <div class="company-card ${wideClass}">
+          <div class="company-card-name">${escapeHtml(company)}</div>
+          <span class="badge">${yearRange}</span>
+          <div class="company-card-breakdown ${columnClass}">${annualBreakdown}</div>
+          <div class="company-card-total">Total: ${formatCurrency(data.total, 'MYR')}</div>
+        </div>
+      `;
+    }).join('');
+  }
+
+  function setCompanyReportView(mode) {
+    const isTable = mode === 'table';
+    document.getElementById('companyReportTable').style.display = isTable ? 'table' : 'none';
+    document.getElementById('companyReportCards').style.display = isTable ? 'none' : 'grid';
+    document.getElementById('companyReportTableBtn').classList.toggle('active', isTable);
+    document.getElementById('companyReportCardBtn').classList.toggle('active', !isTable);
+  }
+
+  function renderIrasTable(irasRecords) {
+    if (irasRecords.length === 0) {
+      irasTableBody.innerHTML = `<tr><td colspan="7" style="text-align: center; color: var(--text-muted);">No IRAS records saved yet.</td></tr>`;
+      return;
+    }
+
+    irasTableBody.innerHTML = irasRecords.map(r => {
+      const yearSubmitStr = (r.yearSubmit !== null && r.yearSubmit !== undefined && !isNaN(r.yearSubmit)) ? r.yearSubmit : '-';
+      const noaStr = r.noa ? `<span class="badge badge-iras">${escapeHtml(r.noa)}</span>` : '<span style="color: var(--text-muted);">-</span>';
+      const noaIncomeStr = (r.noaIncome !== null && r.noaIncome !== undefined) ? formatCurrency(r.noaIncome, 'SGD') : '-';
+      const taxPaymentStr = (r.taxPayment !== null && r.taxPayment !== undefined) ? formatCurrency(r.taxPayment, 'SGD') : '-';
+      const netIncome = (r.noaIncome || 0) - (r.taxPayment || 0);
+      const netIncomeStr = (r.noaIncome !== null && r.noaIncome !== undefined) || (r.taxPayment !== null && r.taxPayment !== undefined)
+        ? formatCurrency(netIncome, 'SGD') : '-';
+
+      const ageStr = currentMemberBirthYear ? `<br><small style="color: var(--text-muted);">Age: ${r.yearWorking - currentMemberBirthYear}</small>` : '';
+
+      return `
+        <tr>
+          <td><strong>${r.yearWorking}</strong>${ageStr}</td>
+          <td>${yearSubmitStr}</td>
+          <td>${noaStr}</td>
+          <td>${noaIncomeStr}</td>
+          <td style="color: var(--iras-red); font-weight: bold;">${taxPaymentStr}</td>
+          <td style="color: var(--success); font-weight: bold;">${netIncomeStr}</td>
+          <td class="no-print">
+            <button class="icon-btn edit" title="Edit IRAS Record" data-action="edit-iras-record" data-id="${r.id}">
+              <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path stroke-linecap="round" stroke-linejoin="round" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
+              </svg>
+            </button>
+            <button class="icon-btn delete" title="Delete IRAS Record" data-action="delete-iras-record" data-id="${r.id}">
+              <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path stroke-linecap="round" stroke-linejoin="round" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+              </svg>
+            </button>
+          </td>
+        </tr>
+      `;
+    }).join('');
+  }
+
+  // ============================================================
+  // Event Wiring (no inline handlers)
+  // ------------------------------------------------------------
+  // CSP's script-src has no 'unsafe-inline', so every click / change /
+  // keydown that used to be an onclick="..."/onchange="..."/onkeydown="..."
+  // attribute in the HTML is wired up here instead.
+  // ============================================================
+
+  // Static, always-present buttons: id -> click handler.
+  const staticClickHandlers = {
+    setupPasscodeBtn: () => handleSetupPasscode(),
+    unlockBtn: () => handleUnlock(),
+    exportJsonBtn: () => openExportModal(),
+    importJsonBtn: () => document.getElementById('importFileInput').click(),
+    changePasscodeMenuBtn: () => openChangePasscodeModal(),
+    lockAppBtn: () => lockApp(),
+    openMembersBtn: () => openMembersModal(),
+    printReportBtn: () => printCurrentView(),
+    openQuickAddBtn: () => openQuickAddModal(),
+    backToOverviewBtn: () => backToOverview(),
+    printLedgerBtn: () => printCurrentView(),
+    toggleLhdnFormBtn: () => toggleLhdnForm(),
+    cancelEditBtn: () => resetForm(),
+    companyReportTableBtn: () => setCompanyReportView('table'),
+    companyReportCardBtn: () => setCompanyReportView('card'),
+    toggleIrasFormBtn: () => toggleIrasForm(),
+    cancelIrasEditBtn: () => resetIrasForm(),
+    addMemberBtn: () => addMemberFromModal(),
+    closeMembersModalBtn: () => closeMembersModal(),
+    closeQuickAddModalBtn: () => closeQuickAddModal(),
+    quickAddGoBtn: () => quickAddGo(),
+    closeChangePasscodeModalBtn: () => closeChangePasscodeModal(),
+    changePasscodeBtn: () => handleChangePasscode(),
+    closeExportModalBtn: () => closeExportModal(),
+    performExportBtn: () => performExport(),
+    closeImportPasscodeModalBtn: () => closeImportPasscodeModal(),
+    decryptImportBtn: () => decryptAndImport(),
+  };
+  Object.entries(staticClickHandlers).forEach(([id, handler]) => {
+    const el = document.getElementById(id);
+    if (el) el.addEventListener('click', handler);
+    else console.warn(`Event wiring: #${id} not found in DOM.`);
+  });
+
+  // Dynamically re-rendered elements (records table, IRAS table, members
+  // list, overview cards, income-source rows) carry a data-action
+  // attribute instead of an id, since they're recreated on every render.
+  // One delegated listener on document handles all of them.
+  document.addEventListener('click', (e) => {
+    const target = e.target.closest('[data-action]');
+    if (!target) return;
+    const { action, id, type } = target.dataset;
+    switch (action) {
+      case 'remove-source-row': removeSourceRow(target); break;
+      case 'open-ledger': openLedger(Number(id), type); break;
+      case 'save-member-edits': saveMemberEdits(Number(id)); break;
+      case 'delete-member-entirely': deleteMemberEntirely(Number(id)); break;
+      case 'edit-record': editRecord(Number(id)); break;
+      case 'delete-record': deleteRecord(Number(id)); break;
+      case 'edit-iras-record': editIrasRecord(Number(id)); break;
+      case 'delete-iras-record': deleteIrasRecord(Number(id)); break;
+    }
+  });
+
+  // change listeners (formerly onchange="...")
+  document.getElementById('importFileInput').addEventListener('change', importJSON);
+  ownerFilter.addEventListener('change', renderOverviewCards);
+  document.getElementById('quickAddMember').addEventListener('change', updateQuickAddTypeOptions);
+  document.getElementById('exportEncryptToggle').addEventListener('change', updateExportModalView);
+
+  // keydown listeners (formerly onkeydown="...") — Enter-to-advance /
+  // Enter-to-submit on passcode fields.
+  document.getElementById('setupPasscode').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') document.getElementById('setupPasscodeConfirm').focus();
+  });
+  document.getElementById('setupPasscodeConfirm').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') handleSetupPasscode();
+  });
+  document.getElementById('unlockPasscode').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') handleUnlock();
+  });
+  document.getElementById('importBackupPasscode').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') decryptAndImport();
+  });
+
+  // ============================================================
+  // App Initialization
+  // ============================================================
+  if (!(window.crypto && window.crypto.subtle)) {
+    document.getElementById('lockScreen').style.display = 'none';
+    showFatalError('Encryption (Web Crypto) is not available in this browser context. This usually happens when opening the file directly (file://) in a browser that restricts it to secure contexts. Try opening this file via a local web server (e.g. http://localhost) instead, or use a browser such as Chrome which generally supports it over file:// URLs.');
+  } else {
+    initDB().then(async () => {
+      const meta = await getVaultMeta();
+      showLockScreen(meta ? 'unlock' : 'setup');
+    }).catch(err => {
+      console.error(err);
+      document.getElementById('lockScreen').style.display = 'none';
+      showFatalError((err && err.message) ? err.message : 'Failed to initialize the local database. Try reloading the page.');
+    });
+  }
+
+  // PWA: register the service worker for offline support. This is a no-op
+  // (silently skipped) in contexts that don't support it, e.g. file:// URLs
+  // in some browsers — the app still works fully without it.
+  if ('serviceWorker' in navigator) {
+    window.addEventListener('load', () => {
+      navigator.serviceWorker.register('./sw.js').catch(err => {
+        console.warn('Service worker registration failed:', err);
+      });
+    });
+  }
+</script>
+
+<!--
+  SRI reference (Subresource Integrity)
+  --------------------------------------
+  No external <script> is loaded today, so there is nothing to pin yet.
+  If a library is added from cdnjs or jsdelivr in future, load it like this
+  so a compromised/poisoned CDN file is rejected by the browser instead of
+  silently executing:
+
+    <script
+      src="https://cdnjs.cloudflare.com/ajax/libs/<lib>/<version>/<file>.min.js"
+      integrity="sha384-<hash-from-the-cdn-provider-or-`openssl dgst -sha384 -binary file.js | openssl base64 -A`>"
+      crossorigin="anonymous"
+      referrerpolicy="no-referrer"></script>
+
+  Get the integrity hash from the CDN's own copy button (cdnjs and
+  jsdelivr both show it next to each file/version), never compute it from a
+  copy you already trust locally without cross-checking against the
+  provider's published hash.
+-->
+</body>
+</html>
