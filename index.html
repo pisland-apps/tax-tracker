@@ -250,6 +250,15 @@
     .note-list { margin: 0.15rem 0 0 1.1rem; padding: 0; color: var(--text-muted); font-size: 0.8rem; font-style: italic; }
     .note-list li { margin-bottom: 0.1rem; }
 
+    /* Singapore permit status */
+    .member-row-permit { display: flex; align-items: center; gap: 0.6rem; flex-wrap: wrap; width: 100%; padding-top: 0.4rem; margin-top: 0.4rem; border-top: 1px dashed var(--border); font-size: 0.8rem; color: var(--text-muted); }
+    .member-row-permit label { display: flex; align-items: center; gap: 0.3rem; white-space: nowrap; }
+    .member-row-permit select, .member-row-permit input[type="date"] { padding: 0.3rem; font-size: 0.8rem; }
+    .member-card-permit { font-size: 0.8rem; margin: -0.3rem 0 0.6rem; }
+    .permit-reminder-banner { background: #fffbeb; border: 1px solid #fde68a; color: #92400e; padding: 0.85rem 1.1rem; border-radius: var(--radius); margin-bottom: 1rem; font-size: 0.9rem; }
+    .permit-reminder-banner ul { margin: 0.4rem 0 0 1.2rem; padding: 0; }
+    .permit-reminder-banner li { margin-bottom: 0.15rem; }
+
     /* Attachment Viewer Modal */
     .av-modal-card { background: var(--card-bg); border-radius: var(--radius); max-width: 800px; width: 100%; max-height: 90vh; display: flex; flex-direction: column; box-shadow: 0 10px 40px rgba(0,0,0,0.25); }
     .av-modal-header { display: flex; align-items: center; justify-content: space-between; gap: 1rem; padding: 1rem 1.25rem; border-bottom: 1px solid var(--border); }
@@ -312,6 +321,8 @@
       <button class="btn btn-secondary" id="lockAppBtn">🔒 Lock</button>
     </div>
   </div>
+
+  <div id="permitReminderBanner" class="permit-reminder-banner no-print" style="display: none;"></div>
 
   <!-- ============================= OVERVIEW VIEW ============================= -->
   <div id="overviewView">

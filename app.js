@@ -13,7 +13,7 @@
   // Service Worker/cache in devtools — it means the browser is still
   // running an old cached build, not that the deploy failed.
   // ============================================================
-  const APP_VERSION = 'v6';
+  const APP_VERSION = 'v7';
   const APP_VERSION_DATE = '2026-08-09';
 
   (function initVersionBadge() {
@@ -277,6 +277,31 @@
   // Members created before the LHDN/IRAS toggle existed default to both enabled.
   function memberTaxTypes(member) {
     return (member && member.taxTypes) ? member.taxTypes : { lhdn: true, iras: true };
+  }
+
+  // ------------------------------------------------------------
+  // Singapore work-pass / permit status (WP / SP / EP / PR) — a
+  // per-member attribute (not per tax-year record), since a permit
+  // spans multiple filing years. Grouped with the IRAS side of the app
+  // since it only applies to Singapore members.
+  // ------------------------------------------------------------
+  const PERMIT_LABELS = { WP: 'Work Permit (WP)', SP: 'S Pass (SP)', EP: 'Employment Pass (EP)', PR: 'Permanent Resident (PR)' };
+  const PERMIT_RENEWAL_WINDOW_DAYS = 365; // "due start/before 12 months"
+
+  function daysUntilDate(dateStr) {
+    if (!dateStr) return null;
+    const target = new Date(dateStr + 'T00:00:00');
+    if (isNaN(target.getTime())) return null;
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    return Math.round((target - today) / 86400000);
+  }
+
+  function formatPermitDate(dateStr) {
+    if (!dateStr) return '';
+    const d = new Date(dateStr + 'T00:00:00');
+    if (isNaN(d.getTime())) return dateStr;
+    return d.toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' });
   }
 
   // ============================================================
@@ -582,7 +607,15 @@
       // memberId, so re-adding members with saveMember() (which always
       // generates a brand-new ID) would silently orphan every record.
       for (const m of importedData.members) {
-        await updateMemberInDB({ id: m.id, name: m.name, taxTypes: m.taxTypes || { lhdn: true, iras: true }, birthYear: (m.birthYear !== undefined ? m.birthYear : null) });
+        await updateMemberInDB({
+          id: m.id,
+          name: m.name,
+          taxTypes: m.taxTypes || { lhdn: true, iras: true },
+          birthYear: (m.birthYear !== undefined ? m.birthYear : null),
+          permitStatus: (m.permitStatus !== undefined ? m.permitStatus : null),
+          permitFrom: (m.permitFrom !== undefined ? m.permitFrom : null),
+          permitTill: (m.permitTill !== undefined ? m.permitTill : null)
+        });
       }
       for (const r of importedData.records) {
         await saveRecordToDB(r);
@@ -1128,6 +1161,7 @@
           <div class="member-card iras-card" data-action="open-ledger" data-id="${m.id}" data-type="iras">
             <div class="member-card-badge">IRAS · Singapore</div>
             <div class="member-card-name">${escapeHtml(m.name)}</div>
+            ${renderPermitStatusLine(m)}
             <div class="member-card-stats">
               <div>Total Income: <strong style="color: #1d4ed8;">${formatCurrency(totals.totalIncome, 'SGD')}</strong></div>
               <div>Total Tax Paid: <strong style="color: var(--danger);">${formatCurrency(totals.taxPaid, 'SGD')}</strong></div>
@@ -1140,6 +1174,50 @@
 
     overviewCardsGrid.innerHTML = cardsHtml ||
       `<div class="empty-state">No members yet. Click "👥 Members" above to add one.</div>`;
+
+    renderPermitReminderBanner(members);
+  }
+
+  // "Status & Date Renewal" line on an IRAS member card. Empty string
+  // (no line rendered) when the member has no permit status set.
+  function renderPermitStatusLine(member) {
+    if (!member.permitStatus) return '';
+    const days = daysUntilDate(member.permitTill);
+    let colorStyle = 'color: var(--text-muted);';
+    let dueText = '';
+    if (days !== null) {
+      if (days < 0) { colorStyle = 'color: var(--danger); font-weight: 700;'; dueText = ` — overdue by ${Math.abs(days)}d`; }
+      else if (days <= PERMIT_RENEWAL_WINDOW_DAYS) { colorStyle = 'color: #b45309; font-weight: 700;'; dueText = ` — due in ${days}d`; }
+    }
+    const till = member.permitTill ? `renews ${formatPermitDate(member.permitTill)}` : 'no renewal date set';
+    return `<div class="member-card-permit" style="${colorStyle}">🛂 ${escapeHtml(member.permitStatus)} · ${till}${dueText}</div>`;
+  }
+
+  // Top-of-page banner: any IRAS member whose permit is due for renewal
+  // within PERMIT_RENEWAL_WINDOW_DAYS (or already overdue).
+  function renderPermitReminderBanner(members) {
+    const banner = document.getElementById('permitReminderBanner');
+    if (!banner) return;
+
+    const due = members
+      .filter(m => m.permitStatus && m.permitTill)
+      .map(m => ({ member: m, days: daysUntilDate(m.permitTill) }))
+      .filter(x => x.days !== null && x.days <= PERMIT_RENEWAL_WINDOW_DAYS)
+      .sort((a, b) => a.days - b.days);
+
+    if (due.length === 0) {
+      banner.style.display = 'none';
+      banner.innerHTML = '';
+      return;
+    }
+
+    const items = due.map(({ member, days }) => {
+      const status = days < 0 ? `overdue by ${Math.abs(days)} day${Math.abs(days) === 1 ? '' : 's'}` : `due in ${days} day${days === 1 ? '' : 's'}`;
+      return `<li><strong>${escapeHtml(member.name)}</strong> — ${escapeHtml(PERMIT_LABELS[member.permitStatus] || member.permitStatus)} renews ${formatPermitDate(member.permitTill)} (${status})</li>`;
+    }).join('');
+
+    banner.innerHTML = `⚠️ <strong>Singapore permit renewal reminder</strong><ul>${items}</ul>`;
+    banner.style.display = 'block';
   }
 
   // ============================================================
@@ -1243,6 +1321,9 @@
 
     listEl.innerHTML = members.map(m => {
       const t = memberTaxTypes(m);
+      const permitOptions = ['', 'WP', 'SP', 'EP', 'PR'].map(code =>
+        `<option value="${code}" ${((m.permitStatus || '') === code) ? 'selected' : ''}>${code || '— No Permit —'}</option>`
+      ).join('');
       return `
         <div class="member-row">
           <input type="text" value="${escapeHtml(m.name)}" id="memberName_${m.id}">
@@ -1255,6 +1336,13 @@
               <path stroke-linecap="round" stroke-linejoin="round" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
             </svg>
           </button>
+          <div class="member-row-permit">
+            <label>🇸🇬 Permit
+              <select id="memberPermitStatus_${m.id}">${permitOptions}</select>
+            </label>
+            <label>From <input type="date" id="memberPermitFrom_${m.id}" value="${m.permitFrom || ''}"></label>
+            <label>Till <input type="date" id="memberPermitTill_${m.id}" value="${m.permitTill || ''}"></label>
+          </div>
         </div>
       `;
     }).join('');
@@ -1266,11 +1354,17 @@
     const birthYear = birthYearVal !== '' ? parseInt(birthYearVal, 10) : null;
     const lhdn = document.getElementById(`memberLhdn_${id}`).checked;
     const iras = document.getElementById(`memberIras_${id}`).checked;
+    const permitStatusVal = document.getElementById(`memberPermitStatus_${id}`).value;
+    const permitStatus = permitStatusVal !== '' ? permitStatusVal : null;
+    const permitFromVal = document.getElementById(`memberPermitFrom_${id}`).value;
+    const permitTillVal = document.getElementById(`memberPermitTill_${id}`).value;
+    const permitFrom = permitFromVal !== '' ? permitFromVal : null;
+    const permitTill = permitTillVal !== '' ? permitTillVal : null;
 
     if (!name) { alert('Name cannot be empty.'); return; }
     if (!lhdn && !iras) { alert('Select at least one tax type: LHDN or IRAS.'); return; }
 
-    await updateMemberInDB({ id, name, taxTypes: { lhdn, iras }, birthYear });
+    await updateMemberInDB({ id, name, taxTypes: { lhdn, iras }, birthYear, permitStatus, permitFrom, permitTill });
     await renderMembersModalList();
 
     // If this member's Ledger is currently open, refresh the cached birth
