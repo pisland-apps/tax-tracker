@@ -13,7 +13,7 @@
   // Service Worker/cache in devtools — it means the browser is still
   // running an old cached build, not that the deploy failed.
   // ============================================================
-  const APP_VERSION = 'v8';
+  const APP_VERSION = 'v9';
   const APP_VERSION_DATE = '2026-08-09';
 
   (function initVersionBadge() {
@@ -21,13 +21,15 @@
     if (el) el.textContent = `${APP_VERSION} · ${APP_VERSION_DATE}`;
   })();
 
-  // pdf.js worker — must stay in sync with the pdf.js <script> version
-  // loaded in index.html (see the CSP/SRI comment there). Used by the
-  // in-app attachment viewer to render PDFs onto <canvas> instead of
-  // relying on the browser's own PDF handling (which can silently
-  // download instead of preview, or render blank in an iframe).
+  // pdf.js worker — vendored locally at ./lib/pdf.worker.min.js, from the
+  // same pdfjs-dist 3.11.174 package as ./lib/pdf.min.js loaded in
+  // index.html. Must stay the same version as that file — mismatched
+  // main/worker builds can fail in confusing ways. Used by the in-app
+  // attachment viewer to render PDFs onto <canvas> instead of relying on
+  // the browser's own PDF handling (which can silently download instead
+  // of preview, or render blank in an iframe).
   if (window.pdfjsLib) {
-    pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+    pdfjsLib.GlobalWorkerOptions.workerSrc = 'lib/pdf.worker.min.js';
   }
 
   // ============================================================

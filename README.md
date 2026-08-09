@@ -59,16 +59,21 @@ Every time `app.js` or `index.html` changes, before shipping:
 3. If a version badge after deploying doesn't match what you expect,
    that's a signal to hard-refresh (Ctrl/Cmd+Shift+R) or clear the site's
    Service Worker/cache in devtools — not that the deploy failed.
-4. If you touched anything under `Content-Security-Policy` in
-   `index.html` (e.g. adding a new CDN script), replace any
-   `integrity="sha384-PLACEHOLDER..."` hashes with the real ones before
-   deploying:
+4. pdf.js (used for the in-app attachment viewer) is vendored locally at
+   `./lib/pdf.min.js` and `./lib/pdf.worker.min.js` — not loaded from a
+   CDN, so there's no `integrity=` hash to maintain and the CSP's
+   `script-src`/`worker-src` stay `'self'`-only. To update pdf.js to a
+   newer version:
    ```
-   curl -s <script-url> | openssl dgst -sha384 -binary | openssl base64 -A
+   npm pack pdfjs-dist@<version>
+   tar xzf pdfjs-dist-<version>.tgz
+   cp package/build/pdf.min.js package/build/pdf.worker.min.js ./lib/
    ```
-   and cross-check against the hash the CDN itself publishes. The pdf.js
-   script (used for the in-app attachment viewer) currently has a
-   placeholder hash that needs this before it will load.
+   Pull from the official npm package (not a random CDN/GitHub mirror),
+   keep `pdf.min.js` and `pdf.worker.min.js` on the *same* version, add
+   both new files to `APP_SHELL` in `sw.js` if their filenames changed,
+   and bump `CACHE_VERSION`/`APP_VERSION` per steps 1–2 above so the new
+   files actually reach returning visitors.
 
 ## Attachments
 

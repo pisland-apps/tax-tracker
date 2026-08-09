@@ -24,10 +24,10 @@
     silently blocked, since none of those come from an allow-listed host
     and inline script isn't allowed at all.
 
-    script-src also explicitly allowlists cdnjs and jsdelivr (rather than
-    leaving them out) so that if a library is added later, it can ONLY
-    come from these two CDNs and nothing else — see the SRI note near
-    </body> for how to pin such a script with its own integrity hash.
+    script-src is 'self' only — no CDN origins allowlisted. pdf.js is
+    vendored into ./lib/ and served from this origin (see the <script>
+    tag near </body>), so there's no third-party script source left to
+    allowlist, and no SRI hash to keep in sync with a CDN version string.
 
     style-src keeps 'unsafe-inline' — the app still uses inline <style>
     and style="..." attributes extensively (69+ instances), and CSS alone
@@ -36,10 +36,10 @@
 
     img-src adds data: and blob: — the attachment viewer renders receipt
     images from data: URLs (as stored) and PDF pages via blob: object URLs.
-    worker-src adds cdnjs — pdf.js (loaded from cdnjs below) loads its own
-    worker script from the same CDN to render PDF attachments onto canvas.
+    worker-src is 'self' only — pdf.js loads its worker from ./lib/ too
+    (see app.js), so no external worker-src origin is needed either.
   -->
-  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self' https://cdnjs.cloudflare.com https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self'; connect-src 'self'; worker-src 'self' https://cdnjs.cloudflare.com; manifest-src 'self'; base-uri 'none'; form-action 'self'; object-src 'none'">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self'; connect-src 'self'; worker-src 'self'; manifest-src 'self'; base-uri 'none'; form-action 'self'; object-src 'none'">
   <title>Tax Record &amp; Income Tracker</title>
   <link rel="manifest" href="manifest.json">
   <meta name="theme-color" content="#2563eb">
@@ -773,52 +773,19 @@
   pdf.js is loaded here (rather than left to app.js) so pdfjsLib exists
   before app.js runs and configures its worker.
 
-  No integrity= attribute is set. An SRI hash MUST match the fetched file
-  exactly, or the browser silently refuses to execute the script — which
-  is a much worse failure mode than having no SRI at all: the page just
-  looks "stuck" with no visible error, and pdfjsLib ends up undefined.
-  (This is exactly what happened here: an earlier deploy shipped with a
-  literal placeholder string in integrity=, which is indistinguishable
-  from a wrong hash as far as the browser's concerned.)
+  Vendored locally at ./lib/pdf.min.js (pdfjs-dist 3.11.174, pulled from
+  the official npm registry — Mozilla's own publish of pdf.js — rather
+  than a CDN edge copy). Same-origin 'self' scripts aren't subject to
+  SRI in the first place, so there's no integrity= hash to keep in sync
+  here. Trust is anchored once, at vendoring time (see README for how to
+  update this file), not on every page load against a CDN.
 
-  script-src in the CSP above already restricts scripts to 'self' plus
-  this cdnjs origin, so this isn't a wide-open script source even without
-  SRI. To add SRI back in properly: fetch the real hash from a machine
-  that can reach cdnjs (this sandbox's network allowlist doesn't include
-  it), e.g.:
-    curl -s https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js | openssl dgst -sha384 -binary | openssl base64 -A
-  cross-check it against the hash cdnjs itself publishes for that file/
-  version (via https://api.cdnjs.com/libraries/pdf.js/3.11.174?fields=sri),
-  and only then add integrity="sha384-<that value>" crossorigin="anonymous"
-  back onto the <script> tag below. Test that the app still loads
-  correctly afterward — a mismatched hash breaks it silently, not loudly.
+  ./lib/pdf.worker.min.js (configured in app.js) is the matching worker
+  build from the same package — keep both files' versions in lockstep
+  when updating.
 -->
-<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"
+<script src="lib/pdf.min.js"
   referrerpolicy="no-referrer"></script>
 <script src="app.js"></script>
-
-<!--
-  SRI reference (Subresource Integrity)
-  --------------------------------------
-  pdf.js above is currently loaded WITHOUT an integrity= hash — see the
-  comment on that <script> tag for why (a wrong/placeholder hash breaks
-  the script silently, which is worse than no hash). If you add SRI back,
-  or pin any other library from cdnjs/jsdelivr in future, load it like
-  this so a compromised/poisoned CDN file is rejected by the browser
-  instead of silently executing:
-
-    <script
-      src="https://cdnjs.cloudflare.com/ajax/libs/<lib>/<version>/<file>.min.js"
-      integrity="sha384-<hash-from-the-cdn-provider-or-`openssl dgst -sha384 -binary file.js | openssl base64 -A`>"
-      crossorigin="anonymous"
-      referrerpolicy="no-referrer"></script>
-
-  Get the integrity hash from the CDN's own copy button (cdnjs and
-  jsdelivr both show it next to each file/version), never compute it from a
-  copy you already trust locally without cross-checking against the
-  provider's published hash. And critically: after adding it, actually
-  load the page and confirm the script still runs — don't assume a hash
-  is correct just because it's present.
--->
 </body>
 </html>
