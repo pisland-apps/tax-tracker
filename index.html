@@ -33,8 +33,13 @@
     and style="..." attributes extensively (69+ instances), and CSS alone
     can't execute JavaScript, so this is a much lower-risk exception than
     script-src ever was.
+
+    img-src adds data: and blob: — the attachment viewer renders receipt
+    images from data: URLs (as stored) and PDF pages via blob: object URLs.
+    worker-src adds cdnjs — pdf.js (loaded from cdnjs below) loads its own
+    worker script from the same CDN to render PDF attachments onto canvas.
   -->
-  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self' https://cdnjs.cloudflare.com https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline'; img-src 'self'; font-src 'self'; connect-src 'self'; worker-src 'self'; manifest-src 'self'; base-uri 'none'; form-action 'self'; object-src 'none'">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self' https://cdnjs.cloudflare.com https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self'; connect-src 'self'; worker-src 'self' https://cdnjs.cloudflare.com; manifest-src 'self'; base-uri 'none'; form-action 'self'; object-src 'none'">
   <title>Tax Record &amp; Income Tracker</title>
   <link rel="manifest" href="manifest.json">
   <meta name="theme-color" content="#2563eb">
@@ -211,9 +216,47 @@
       .card { box-shadow: none; border: 1px solid #ccc; break-inside: avoid; }
       .container { max-width: 100%; }
     }
+
+    /* Version badge — always present in the DOM (sibling of the lock
+       screen), so it's visible even before the passcode is entered. */
+    .version-badge {
+      position: fixed;
+      right: 8px;
+      bottom: 6px;
+      z-index: 300;
+      font-size: 0.68rem;
+      color: #94a3b8;
+      background: rgba(255,255,255,0.75);
+      padding: 1px 6px;
+      border-radius: 4px;
+      pointer-events: none;
+      font-family: ui-monospace, monospace;
+    }
+
+    /* Attachments */
+    .attachment-add-row { display: flex; align-items: center; gap: 0.75rem; margin: 0.5rem 0 1rem; flex-wrap: wrap; }
+    .attachment-preview { display: flex; flex-direction: column; gap: 0.35rem; }
+    .attachment-chip { display: flex; align-items: center; gap: 0.4rem; font-size: 0.85rem; background: #f8fafc; border: 1px solid var(--border); border-radius: var(--radius); padding: 0.35rem 0.6rem; }
+    .attachment-chip small { color: var(--text); word-break: break-all; }
+    .attachment-remove-btn { background: none; border: none; color: var(--danger); cursor: pointer; font-size: 0.75rem; padding: 0.1rem 0.3rem; margin-left: auto; }
+    .attachment-remove-btn:hover { text-decoration: underline; }
+    .attachment-chip-inline { margin-top: 0.15rem; }
+    .attachment-link-btn { background: none; border: none; cursor: pointer; color: var(--primary); padding: 0; font-size: 0.8rem; display: inline-flex; align-items: center; gap: 0.2rem; text-align: left; }
+    .attachment-link-btn:hover { text-decoration: underline; }
+    .attachment-link-btn small { color: inherit; }
+
+    /* Attachment Viewer Modal */
+    .av-modal-card { background: var(--card-bg); border-radius: var(--radius); max-width: 800px; width: 100%; max-height: 90vh; display: flex; flex-direction: column; box-shadow: 0 10px 40px rgba(0,0,0,0.25); }
+    .av-modal-header { display: flex; align-items: center; justify-content: space-between; gap: 1rem; padding: 1rem 1.25rem; border-bottom: 1px solid var(--border); }
+    .av-modal-header h3 { font-size: 1rem; word-break: break-all; }
+    .av-modal-header-actions { display: flex; gap: 0.5rem; flex-shrink: 0; }
+    .av-modal-body { padding: 1rem; overflow-y: auto; flex: 1; }
   </style>
 </head>
 <body>
+
+<div id="versionBadge" class="version-badge"></div>
+
 
 <!-- ============================= LOCK SCREEN ============================= -->
 <div id="lockScreen" class="lock-screen">
@@ -391,6 +434,15 @@
               </div>
             </details>
 
+            <div class="form-group">
+              <label>Attachments <span style="font-weight:400; color: var(--text-muted);">(receipts, notices — image or PDF, optional)</span></label>
+              <div class="attachment-add-row">
+                <button type="button" class="btn btn-secondary" id="lhdnAttachmentAddBtn">+ Attachment</button>
+                <input type="file" id="lhdnAttachmentInput" accept="image/*,application/pdf" multiple style="display: none;">
+              </div>
+              <div class="attachment-preview" id="lhdnAttachmentPreview"><small style="color: var(--text-muted);">No attachments.</small></div>
+            </div>
+
             <button type="submit" class="btn" id="submitBtn">Save Record</button>
             <button type="button" class="btn btn-cancel" id="cancelEditBtn">Cancel Edit</button>
           </form>
@@ -516,6 +568,15 @@
               <input type="number" step="0.01" id="irasTaxPayment" placeholder="Tax payment (S$)">
             </div>
 
+            <div class="form-group">
+              <label>Attachments <span style="font-weight:400; color: var(--text-muted);">(NOA, receipts — image or PDF, optional)</span></label>
+              <div class="attachment-add-row">
+                <button type="button" class="btn btn-secondary" id="irasAttachmentAddBtn">+ Attachment</button>
+                <input type="file" id="irasAttachmentInput" accept="image/*,application/pdf" multiple style="display: none;">
+              </div>
+              <div class="attachment-preview" id="irasAttachmentPreview"><small style="color: var(--text-muted);">No attachments.</small></div>
+            </div>
+
             <button type="submit" class="btn" id="irasSubmitBtn" style="background: var(--iras-red);">Save IRAS Record</button>
             <button type="button" class="btn btn-cancel" id="cancelIrasEditBtn">Cancel Edit</button>
           </form>
@@ -617,6 +678,13 @@
   <div class="modal-card">
     <h2>Export Backup</h2>
 
+    <div class="form-group">
+      <label for="exportMemberScope">Export Scope</label>
+      <select id="exportMemberScope">
+        <option value="all">All Members</option>
+      </select>
+    </div>
+
     <div class="toggle-row">
       <label class="toggle-switch">
         <input type="checkbox" id="exportEncryptToggle" checked>
@@ -667,6 +735,30 @@
   </div>
 </div>
 
+<!-- ============================= ATTACHMENT VIEWER MODAL ============================= -->
+<div id="attachmentViewerModal" class="modal-overlay no-print">
+  <div class="av-modal-card">
+    <div class="av-modal-header">
+      <h3 id="avTitle">Attachment</h3>
+      <div class="av-modal-header-actions">
+        <a href="#" id="avSaveCopyBtn" class="btn btn-secondary" download>Save a Copy</a>
+        <button type="button" class="btn btn-secondary" id="closeAttachmentViewerBtn">Close</button>
+      </div>
+    </div>
+    <div class="av-modal-body" id="avContent"></div>
+  </div>
+</div>
+<!--
+  pdf.js is loaded here (rather than left to app.js) so pdfjsLib exists
+  before app.js runs and configures its worker. integrity is a PLACEHOLDER —
+  compute the real sha384 before deploying, e.g.:
+    curl -s https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js | openssl dgst -sha384 -binary | openssl base64 -A
+  and cross-check it against the hash cdnjs itself publishes for that file/version.
+-->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"
+  integrity="sha384-PLACEHOLDER-REPLACE-BEFORE-DEPLOY"
+  crossorigin="anonymous"
+  referrerpolicy="no-referrer"></script>
 <script src="app.js"></script>
 
 <!--

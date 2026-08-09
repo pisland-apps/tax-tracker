@@ -1,4 +1,37 @@
   // ============================================================
+  // App Version (display-only label for the small version badge in the
+  // bottom-right corner — visible even on the lock screen before the
+  // passcode is entered, so a stale cached build is obvious at a glance).
+  //
+  // This is INTENTIONALLY separate from CACHE_VERSION in sw.js — one is a
+  // human-readable label, the other drives the Service Worker's cache-
+  // busting. They do NOT sync automatically since they live in different
+  // files. Bump BOTH together on every deploy that touches app.js or
+  // index.html — see the matching reminder comment in sw.js.
+  //
+  // If the badge you see after deploying doesn't match this value, that's
+  // the signal to hard-refresh (Ctrl/Cmd+Shift+R) or clear the site's
+  // Service Worker/cache in devtools — it means the browser is still
+  // running an old cached build, not that the deploy failed.
+  // ============================================================
+  const APP_VERSION = 'v1.1.0';
+  const APP_VERSION_DATE = '2026-08-09';
+
+  (function initVersionBadge() {
+    const el = document.getElementById('versionBadge');
+    if (el) el.textContent = `${APP_VERSION} · ${APP_VERSION_DATE}`;
+  })();
+
+  // pdf.js worker — must stay in sync with the pdf.js <script> version
+  // loaded in index.html (see the CSP/SRI comment there). Used by the
+  // in-app attachment viewer to render PDFs onto <canvas> instead of
+  // relying on the browser's own PDF handling (which can silently
+  // download instead of preview, or render blank in an iframe).
+  if (window.pdfjsLib) {
+    pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+  }
+
+  // ============================================================
   // IndexedDB Setup
   // ============================================================
   const DB_NAME = 'TaxRecordsMultiMemberDB';
@@ -394,8 +427,19 @@
     document.getElementById('exportPasscode').value = '';
     document.getElementById('exportPasscodeConfirm').value = '';
     document.getElementById('exportError').style.display = 'none';
+    populateExportMemberScope();
     updateExportModalView();
     document.getElementById('exportModal').classList.add('open');
+  }
+
+  async function populateExportMemberScope() {
+    const select = document.getElementById('exportMemberScope');
+    const members = await getMembers();
+    const prevValue = select.value || 'all';
+    select.innerHTML = '<option value="all">All Members</option>' +
+      members.map(m => `<option value="${m.id}">${escapeHtml(m.name)}</option>`).join('');
+    // Preserve the previous selection if that member still exists, else fall back to "all".
+    select.value = Array.from(select.options).some(o => o.value === prevValue) ? prevValue : 'all';
   }
 
   function closeExportModal() {
@@ -418,9 +462,21 @@
     const encrypt = document.getElementById('exportEncryptToggle').checked;
     document.getElementById('exportError').style.display = 'none';
 
-    const members = await getMembers();
-    const records = await getAllRecords();
-    const irasRecords = await getAllIrasRecords();
+    const scopeVal = document.getElementById('exportMemberScope').value;
+    const scopeMemberId = scopeVal !== 'all' ? parseInt(scopeVal, 10) : null;
+
+    let members = await getMembers();
+    let records = await getAllRecords();
+    let irasRecords = await getAllIrasRecords();
+
+    let scopedMemberName = null;
+    if (scopeMemberId !== null) {
+      const scopedMember = members.find(m => m.id === scopeMemberId);
+      scopedMemberName = scopedMember ? scopedMember.name : null;
+      members = members.filter(m => m.id === scopeMemberId);
+      records = records.filter(r => r.memberId === scopeMemberId);
+      irasRecords = irasRecords.filter(r => r.memberId === scopeMemberId);
+    }
 
     if (records.length === 0 && members.length === 0 && irasRecords.length === 0) {
       showExportError('No tax records found to export.');
@@ -447,8 +503,9 @@
     const downloadAnchor = document.createElement('a');
 
     const today = new Date().toISOString().split('T')[0];
+    const scopeSlug = scopedMemberName ? '_' + scopedMemberName.trim().replace(/[^a-z0-9]+/gi, '-').replace(/^-+|-+$/g, '') : '';
     downloadAnchor.setAttribute("href", dataStr);
-    downloadAnchor.setAttribute("download", `tax_records_backup_${today}${encrypt ? '_encrypted' : ''}.json`);
+    downloadAnchor.setAttribute("download", `tax_records_backup_${today}${scopeSlug}${encrypt ? '_encrypted' : ''}.json`);
     document.body.appendChild(downloadAnchor);
     downloadAnchor.click();
     downloadAnchor.remove();
@@ -526,7 +583,7 @@
       // memberId, so re-adding members with saveMember() (which always
       // generates a brand-new ID) would silently orphan every record.
       for (const m of importedData.members) {
-        await updateMemberInDB({ id: m.id, name: m.name, taxTypes: m.taxTypes || { lhdn: true, iras: true } });
+        await updateMemberInDB({ id: m.id, name: m.name, taxTypes: m.taxTypes || { lhdn: true, iras: true }, birthYear: (m.birthYear !== undefined ? m.birthYear : null) });
       }
       for (const r of importedData.records) {
         await saveRecordToDB(r);
@@ -539,6 +596,183 @@
       backToOverview();
       await initApp();
     }
+  }
+
+  // ============================================================
+  // Attachment Viewer (receipts / notices attached to a tax record,
+  // stored as base64 data URLs inside the record's encrypted payload)
+  // ------------------------------------------------------------
+  // Deliberately does NOT navigate to the data: URL or embed it in an
+  // iframe: navigating straight to a data: URL makes most browsers treat
+  // it as a download rather than something to view, and iframes showing a
+  // data: PDF render blank in some browsers (or get blocked outright by
+  // the browser's own PDF-handling setting). Instead, PDFs are decoded
+  // and rendered page-by-page onto <canvas> via pdf.js, and images are
+  // shown via a Blob object URL. A "Save a Copy" link is kept separate so
+  // the file can still be downloaded under its real name when that's what
+  // someone actually wants.
+  // ============================================================
+  let avObjectUrls = []; // object URLs for the currently-open attachment — revoked on close/replace
+
+  function dataURLtoUint8Array(dataUrl) {
+    const base64 = dataUrl.substring(dataUrl.indexOf(',') + 1);
+    const binary = atob(base64);
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+    return bytes;
+  }
+
+  function dataURLtoBlob(dataUrl) {
+    const header = dataUrl.substring(0, dataUrl.indexOf(','));
+    const mimeMatch = header.match(/data:(.*?);base64/);
+    const mime = mimeMatch ? mimeMatch[1] : 'application/octet-stream';
+    return new Blob([dataURLtoUint8Array(dataUrl)], { type: mime });
+  }
+
+  // att: { name, type, data } — data is the base64 data: URL as stored in the record
+  async function openAttachmentViewer(att) {
+    avObjectUrls.forEach(url => URL.revokeObjectURL(url));
+    avObjectUrls = [];
+
+    document.getElementById('avTitle').textContent = att.name || 'Attachment';
+    const saveBtn = document.getElementById('avSaveCopyBtn');
+    saveBtn.setAttribute('download', att.name || 'attachment');
+    saveBtn.href = att.data;
+
+    const content = document.getElementById('avContent');
+    content.innerHTML = '<div style="padding: 40px; text-align: center; color: var(--text-muted);">Loading…</div>';
+    document.getElementById('attachmentViewerModal').classList.add('open');
+
+    const isImage = att.type && att.type.startsWith('image/');
+    const isPdf = att.type === 'application/pdf' || /\.pdf$/i.test(att.name || '');
+
+    try {
+      if (isImage) {
+        const blob = dataURLtoBlob(att.data);
+        const url = URL.createObjectURL(blob);
+        avObjectUrls.push(url);
+        content.innerHTML = '';
+        const img = document.createElement('img');
+        img.src = url;
+        img.style.maxWidth = '100%';
+        img.style.borderRadius = 'var(--radius)';
+        content.appendChild(img);
+      } else if (isPdf) {
+        const bytes = dataURLtoUint8Array(att.data);
+        const pdf = await pdfjsLib.getDocument({ data: bytes }).promise;
+        content.innerHTML = '';
+        const containerWidth = content.clientWidth || 700;
+        for (let pageNum = 1; pageNum <= pdf.numPages; pageNum++) {
+          const page = await pdf.getPage(pageNum);
+          const unscaledViewport = page.getViewport({ scale: 1 });
+          const scale = Math.max(0.1, (containerWidth - 20) / unscaledViewport.width);
+          const viewport = page.getViewport({ scale });
+          const canvas = document.createElement('canvas');
+          canvas.width = viewport.width;
+          canvas.height = viewport.height;
+          canvas.style.display = 'block';
+          canvas.style.margin = '0 auto 12px';
+          canvas.style.boxShadow = '0 1px 4px rgba(0,0,0,0.15)';
+          content.appendChild(canvas);
+          await page.render({ canvasContext: canvas.getContext('2d'), viewport }).promise;
+        }
+      } else {
+        content.innerHTML = '<div style="padding: 40px; text-align: center; color: var(--text-muted);">Preview not available for this file type — use "Save a Copy" to download it.</div>';
+      }
+    } catch (err) {
+      content.innerHTML = '<div style="padding: 40px; text-align: center; color: var(--danger);">Could not preview this file: ' + escapeHtml(err.message) + '</div>';
+    }
+  }
+
+  function closeAttachmentViewer() {
+    document.getElementById('attachmentViewerModal').classList.remove('open');
+    avObjectUrls.forEach(url => URL.revokeObjectURL(url));
+    avObjectUrls = [];
+    document.getElementById('avContent').innerHTML = '';
+  }
+
+  // ------------------------------------------------------------
+  // Attachment staging: shared by both the LHDN entry form and the IRAS
+  // entry form. `kind` is 'lhdn' or 'iras' and selects which staging
+  // buckets/DOM ids to use, so the same set of functions serves both
+  // forms without duplicating the logic.
+  // ------------------------------------------------------------
+  const attachmentState = {
+    lhdn: { pending: [], existing: [], removed: new Set() },
+    iras: { pending: [], existing: [], removed: new Set() }
+  };
+
+  function attachmentPreviewElId(kind) { return kind === 'lhdn' ? 'lhdnAttachmentPreview' : 'irasAttachmentPreview'; }
+  function attachmentInputElId(kind) { return kind === 'lhdn' ? 'lhdnAttachmentInput' : 'irasAttachmentInput'; }
+
+  function handleAttachmentSelect(kind, event) {
+    const files = Array.from(event.target.files || []);
+    const state = attachmentState[kind];
+    files.forEach(file => {
+      if (file.size > 8 * 1024 * 1024) { alert('Skipped "' + file.name + '" — over 8MB.'); return; }
+      const reader = new FileReader();
+      reader.onload = () => {
+        state.pending.push({ name: file.name, type: file.type, data: reader.result });
+        renderAttachmentPreview(kind);
+      };
+      reader.readAsDataURL(file);
+    });
+    event.target.value = '';
+  }
+
+  function renderAttachmentPreview(kind) {
+    const state = attachmentState[kind];
+    const container = document.getElementById(attachmentPreviewElId(kind));
+    if (!container) return;
+
+    let html = '';
+    state.existing.forEach((att, i) => {
+      if (state.removed.has(i)) return;
+      html += `<div class="attachment-chip">📎 <small>${escapeHtml(att.name || 'attachment')}</small> <button type="button" class="attachment-remove-btn" data-action="remove-existing-attachment" data-kind="${kind}" data-idx="${i}">Remove</button></div>`;
+    });
+    state.pending.forEach((att, i) => {
+      html += `<div class="attachment-chip">📎 <small>${escapeHtml(att.name || 'attachment')}</small> <span style="color: var(--success); font-size: 0.75rem;">(new)</span> <button type="button" class="attachment-remove-btn" data-action="remove-pending-attachment" data-kind="${kind}" data-idx="${i}">Remove</button></div>`;
+    });
+    container.innerHTML = html || '<small style="color: var(--text-muted);">No attachments.</small>';
+  }
+
+  function removeExistingAttachment(kind, index) {
+    attachmentState[kind].removed.add(index);
+    renderAttachmentPreview(kind);
+  }
+
+  function removePendingAttachment(kind, index) {
+    attachmentState[kind].pending.splice(index, 1);
+    renderAttachmentPreview(kind);
+  }
+
+  function resetAttachmentState(kind) {
+    attachmentState[kind] = { pending: [], existing: [], removed: new Set() };
+    renderAttachmentPreview(kind);
+  }
+
+  function loadAttachmentStateForEdit(kind, attachments) {
+    attachmentState[kind] = { pending: [], existing: Array.isArray(attachments) ? attachments : [], removed: new Set() };
+    renderAttachmentPreview(kind);
+  }
+
+  // Merges the surviving existing attachments with the newly staged ones —
+  // called at submit time to build the `attachments` array saved on the record.
+  function collectAttachmentsForSave(kind) {
+    const state = attachmentState[kind];
+    const remainingExisting = state.existing.filter((att, i) => !state.removed.has(i));
+    return [...remainingExisting, ...state.pending];
+  }
+
+  // Looks up an attachment by record + index (used from the records table,
+  // where records are re-fetched fresh rather than kept around in memory)
+  // and opens it in the shared viewer.
+  async function openRecordAttachment(kind, recordId, index) {
+    const records = kind === 'lhdn' ? await getRecordsByMember(currentMemberId) : await getIrasRecordsByMember(currentMemberId);
+    const record = records.find(r => r.id === recordId);
+    const att = record && Array.isArray(record.attachments) ? record.attachments[index] : null;
+    if (!att) { alert('Attachment not found — it may have been removed.'); return; }
+    openAttachmentViewer(att);
   }
 
   // ============================================================
@@ -1192,7 +1426,8 @@
       incomeAfterTax,
       lhdnYear,
       lhdnAdjustedIncome,
-      lhdnAdjustedTax
+      lhdnAdjustedTax,
+      attachments: collectAttachmentsForSave('lhdn')
     };
 
     if (recordId) {
@@ -1229,7 +1464,8 @@
       yearSubmit: irasYearSubmit,
       noa: irasNoa,
       noaIncome: irasNoaIncome,
-      taxPayment: irasTaxPayment
+      taxPayment: irasTaxPayment,
+      attachments: collectAttachmentsForSave('iras')
     };
 
     if (irasRecordId) {
@@ -1252,6 +1488,8 @@
     document.getElementById('irasNoa').value = record.noa || '';
     document.getElementById('irasNoaIncome').value = record.noaIncome !== null && record.noaIncome !== undefined ? record.noaIncome : '';
     document.getElementById('irasTaxPayment').value = record.taxPayment !== null && record.taxPayment !== undefined ? record.taxPayment : '';
+
+    loadAttachmentStateForEdit('iras', record.attachments);
 
     irasFormTitle.textContent = 'Edit IRAS (Singapore) Tax Entry';
     irasSubmitBtn.textContent = 'Update IRAS Record';
@@ -1277,6 +1515,7 @@
     irasSubmitBtn.textContent = 'Save IRAS Record';
     editingIrasBanner.style.display = 'none';
     cancelIrasEditBtn.style.display = 'none';
+    resetAttachmentState('iras');
   }
 
   async function editRecord(id) {
@@ -1300,6 +1539,8 @@
     incomeSourcesContainer.innerHTML = '';
     record.sources.forEach(s => addSourceRow(s.name, s.amount));
     updateIncomeDeclaredPreview();
+
+    loadAttachmentStateForEdit('lhdn', record.attachments);
 
     formTitle.textContent = 'Edit Tax Record';
     submitBtn.textContent = 'Update Record';
@@ -1329,6 +1570,7 @@
     incomeSourcesContainer.innerHTML = '';
     addSourceRow();
     updateIncomeDeclaredPreview();
+    resetAttachmentState('lhdn');
   }
 
   // ============================================================
@@ -1389,7 +1631,10 @@
       const sourcesList = r.sources.length > 0
         ? r.sources.map(s => `<div><strong>${escapeHtml(s.name)}:</strong> ${formatCurrency(s.amount, 'MYR')}</div>`).join('')
         : '';
-      const sourcesCell = [sourcesList, hasLhdn ? lhdnBadge : ''].filter(Boolean).join('<br>')
+      const attachmentsHtml = (Array.isArray(r.attachments) && r.attachments.length > 0)
+        ? r.attachments.map((att, i) => `<div class="attachment-chip-inline no-print"><button type="button" class="attachment-link-btn" data-action="open-record-attachment" data-kind="lhdn" data-id="${r.id}" data-idx="${i}">📎 <small>${escapeHtml(att.name || 'attachment')}</small></button></div>`).join('')
+        : '';
+      const sourcesCell = [sourcesList, hasLhdn ? lhdnBadge : '', attachmentsHtml].filter(Boolean).join('<br>')
         || '<span style="color: var(--text-muted);">-</span>';
 
       const hasYearSubmit = (r.yearSubmit !== null && r.yearSubmit !== undefined && !isNaN(r.yearSubmit));
@@ -1550,7 +1795,10 @@
 
     irasTableBody.innerHTML = irasRecords.map(r => {
       const yearSubmitStr = (r.yearSubmit !== null && r.yearSubmit !== undefined && !isNaN(r.yearSubmit)) ? r.yearSubmit : '-';
-      const noaStr = r.noa ? `<span class="badge badge-iras">${escapeHtml(r.noa)}</span>` : '<span style="color: var(--text-muted);">-</span>';
+      const attachmentsHtml = (Array.isArray(r.attachments) && r.attachments.length > 0)
+        ? r.attachments.map((att, i) => `<div class="attachment-chip-inline no-print"><button type="button" class="attachment-link-btn" data-action="open-record-attachment" data-kind="iras" data-id="${r.id}" data-idx="${i}">📎 <small>${escapeHtml(att.name || 'attachment')}</small></button></div>`).join('')
+        : '';
+      const noaStr = (r.noa ? `<span class="badge badge-iras">${escapeHtml(r.noa)}</span>` : '<span style="color: var(--text-muted);">-</span>') + (attachmentsHtml ? '<br>' + attachmentsHtml : '');
       const noaIncomeStr = (r.noaIncome !== null && r.noaIncome !== undefined) ? formatCurrency(r.noaIncome, 'SGD') : '-';
       const taxPaymentStr = (r.taxPayment !== null && r.taxPayment !== undefined) ? formatCurrency(r.taxPayment, 'SGD') : '-';
       const netIncome = (r.noaIncome || 0) - (r.taxPayment || 0);
@@ -1621,6 +1869,9 @@
     performExportBtn: () => performExport(),
     closeImportPasscodeModalBtn: () => closeImportPasscodeModal(),
     decryptImportBtn: () => decryptAndImport(),
+    closeAttachmentViewerBtn: () => closeAttachmentViewer(),
+    lhdnAttachmentAddBtn: () => document.getElementById('lhdnAttachmentInput').click(),
+    irasAttachmentAddBtn: () => document.getElementById('irasAttachmentInput').click(),
   };
   Object.entries(staticClickHandlers).forEach(([id, handler]) => {
     const el = document.getElementById(id);
@@ -1645,6 +1896,9 @@
       case 'delete-record': deleteRecord(Number(id)); break;
       case 'edit-iras-record': editIrasRecord(Number(id)); break;
       case 'delete-iras-record': deleteIrasRecord(Number(id)); break;
+      case 'open-record-attachment': openRecordAttachment(target.dataset.kind, Number(id), Number(target.dataset.idx)); break;
+      case 'remove-existing-attachment': removeExistingAttachment(target.dataset.kind, Number(target.dataset.idx)); break;
+      case 'remove-pending-attachment': removePendingAttachment(target.dataset.kind, Number(target.dataset.idx)); break;
     }
   });
 
@@ -1653,6 +1907,8 @@
   ownerFilter.addEventListener('change', renderOverviewCards);
   document.getElementById('quickAddMember').addEventListener('change', updateQuickAddTypeOptions);
   document.getElementById('exportEncryptToggle').addEventListener('change', updateExportModalView);
+  document.getElementById('lhdnAttachmentInput').addEventListener('change', (e) => handleAttachmentSelect('lhdn', e));
+  document.getElementById('irasAttachmentInput').addEventListener('change', (e) => handleAttachmentSelect('iras', e));
 
   // keydown listeners (formerly onkeydown="...") — Enter-to-advance /
   // Enter-to-submit on passcode fields.

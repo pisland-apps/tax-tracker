@@ -4,7 +4,12 @@
 // Bump it by 1 every time index.html (or any cached asset) changes, so
 // returning visitors' browsers pick up the new version instead of
 // continuing to serve a stale cached copy.
-const CACHE_VERSION = 4;
+//
+// This is separate from APP_VERSION / APP_VERSION_DATE in app.js (the
+// human-readable label shown in the bottom-right version badge) — the two
+// don't sync automatically since they live in different files. Bump BOTH
+// together on every deploy that touches app.js or index.html.
+const CACHE_VERSION = 5;
 const CACHE_NAME = `tax-tracker-cache-v${CACHE_VERSION}`;
 
 const APP_SHELL = [
