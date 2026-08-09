@@ -771,24 +771,41 @@
 </div>
 <!--
   pdf.js is loaded here (rather than left to app.js) so pdfjsLib exists
-  before app.js runs and configures its worker. integrity is a PLACEHOLDER —
-  compute the real sha384 before deploying, e.g.:
+  before app.js runs and configures its worker.
+
+  No integrity= attribute is set. An SRI hash MUST match the fetched file
+  exactly, or the browser silently refuses to execute the script — which
+  is a much worse failure mode than having no SRI at all: the page just
+  looks "stuck" with no visible error, and pdfjsLib ends up undefined.
+  (This is exactly what happened here: an earlier deploy shipped with a
+  literal placeholder string in integrity=, which is indistinguishable
+  from a wrong hash as far as the browser's concerned.)
+
+  script-src in the CSP above already restricts scripts to 'self' plus
+  this cdnjs origin, so this isn't a wide-open script source even without
+  SRI. To add SRI back in properly: fetch the real hash from a machine
+  that can reach cdnjs (this sandbox's network allowlist doesn't include
+  it), e.g.:
     curl -s https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js | openssl dgst -sha384 -binary | openssl base64 -A
-  and cross-check it against the hash cdnjs itself publishes for that file/version.
+  cross-check it against the hash cdnjs itself publishes for that file/
+  version (via https://api.cdnjs.com/libraries/pdf.js/3.11.174?fields=sri),
+  and only then add integrity="sha384-<that value>" crossorigin="anonymous"
+  back onto the <script> tag below. Test that the app still loads
+  correctly afterward — a mismatched hash breaks it silently, not loudly.
 -->
 <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"
-  integrity="sha384-PLACEHOLDER-REPLACE-BEFORE-DEPLOY"
-  crossorigin="anonymous"
   referrerpolicy="no-referrer"></script>
 <script src="app.js"></script>
 
 <!--
   SRI reference (Subresource Integrity)
   --------------------------------------
-  No external <script> is loaded today, so there is nothing to pin yet.
-  If a library is added from cdnjs or jsdelivr in future, load it like this
-  so a compromised/poisoned CDN file is rejected by the browser instead of
-  silently executing:
+  pdf.js above is currently loaded WITHOUT an integrity= hash — see the
+  comment on that <script> tag for why (a wrong/placeholder hash breaks
+  the script silently, which is worse than no hash). If you add SRI back,
+  or pin any other library from cdnjs/jsdelivr in future, load it like
+  this so a compromised/poisoned CDN file is rejected by the browser
+  instead of silently executing:
 
     <script
       src="https://cdnjs.cloudflare.com/ajax/libs/<lib>/<version>/<file>.min.js"
@@ -799,7 +816,9 @@
   Get the integrity hash from the CDN's own copy button (cdnjs and
   jsdelivr both show it next to each file/version), never compute it from a
   copy you already trust locally without cross-checking against the
-  provider's published hash.
+  provider's published hash. And critically: after adding it, actually
+  load the page and confirm the script still runs — don't assume a hash
+  is correct just because it's present.
 -->
 </body>
 </html>
