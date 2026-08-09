@@ -13,7 +13,7 @@
   // Service Worker/cache in devtools — it means the browser is still
   // running an old cached build, not that the deploy failed.
   // ============================================================
-  const APP_VERSION = 'v9';
+  const APP_VERSION = 'v10';
   const APP_VERSION_DATE = '2026-08-09';
 
   (function initVersionBadge() {
@@ -456,6 +456,7 @@
     populateExportMemberScope();
     updateExportModalView();
     document.getElementById('exportModal').classList.add('open');
+    pushNavLayer('exportModal');
   }
 
   async function populateExportMemberScope() {
@@ -536,7 +537,7 @@
     downloadAnchor.click();
     downloadAnchor.remove();
 
-    closeExportModal();
+    requestCloseLayer('exportModal');
   }
 
   async function importJSON(event) {
@@ -553,6 +554,7 @@
           document.getElementById('importBackupPasscode').value = '';
           document.getElementById('importPasscodeError').style.display = 'none';
           document.getElementById('importPasscodeModal').classList.add('open');
+          pushNavLayer('importPasscodeModal');
           return;
         }
 
@@ -593,7 +595,7 @@
       }
 
       const dataToImport = decrypted;
-      closeImportPasscodeModal();
+      requestCloseLayer('importPasscodeModal');
       await applyImportedData(dataToImport);
     } catch (err) {
       errEl.textContent = 'Incorrect backup passcode, or corrupted file.';
@@ -627,6 +629,9 @@
       }
 
       alert("Import completed successfully!");
+      // A full data reload resets straight to the home/Overview screen —
+      // drop any tracked overlays rather than closing them one by one.
+      navStack.length = 0;
       backToOverview();
       await initApp();
     }
@@ -676,6 +681,7 @@
     const content = document.getElementById('avContent');
     content.innerHTML = '<div style="padding: 40px; text-align: center; color: var(--text-muted);">Loading…</div>';
     document.getElementById('attachmentViewerModal').classList.add('open');
+    pushNavLayer('attachmentViewerModal');
 
     const isImage = att.type && att.type.startsWith('image/');
     const isPdf = att.type === 'application/pdf' || /\.pdf$/i.test(att.name || '');
@@ -808,6 +814,86 @@
     if (!att) { alert('Attachment not found — it may have been removed.'); return; }
     openAttachmentViewer(att);
   }
+
+  // ============================================================
+  // Back-button navigation stack
+  // ------------------------------------------------------------
+  // On mobile/tablet, the hardware/gesture "back" action closes the
+  // whole app unless the page has its own in-app history entries to
+  // consume first. We push one history entry every time an overlay
+  // opens (the Ledger view, any modal, or the attachment viewer), and
+  // a `popstate` listener below closes whichever one is on top.
+  //
+  // Every in-app "Close / Cancel / Back to Overview" control — and
+  // every place the code closes one of these layers on its own (e.g.
+  // auto-closing the Export modal after a successful export) — routes
+  // through requestCloseLayer() instead of calling the close function
+  // directly. That keeps there being exactly one thing (the popstate
+  // handler) that ever performs the actual close, so a tap on a Close
+  // button and a hardware back press always behave identically and
+  // never desync the history stack.
+  // ============================================================
+  const navStack = [];
+
+  function pushNavLayer(name) {
+    navStack.push(name);
+    history.pushState({ appNavLayer: name }, '');
+  }
+
+  // Swaps the top layer for a new one without adding an extra history
+  // entry — used when one overlay leads directly into another as a
+  // single user action (e.g. the Quick Add modal handing off straight
+  // to the Ledger view), so the back button only needs one press to
+  // undo the whole action.
+  function replaceNavLayer(oldName, newName) {
+    const idx = navStack.lastIndexOf(oldName);
+    if (idx !== -1) navStack[idx] = newName; else navStack.push(newName);
+    history.replaceState({ appNavLayer: newName }, '');
+  }
+
+  // Call this to close a given layer — from a Close/Cancel button, or
+  // from code that wants to auto-close it (e.g. after a successful
+  // export). Goes through history.back() so the popstate handler below
+  // performs the actual close exactly once.
+  function requestCloseLayer(name) {
+    if (navStack.length && navStack[navStack.length - 1] === name) {
+      history.back();
+    } else if (navStack.includes(name)) {
+      // Not on top (shouldn't normally happen since overlays block
+      // interaction with anything beneath them) — close it directly
+      // rather than risk unwinding layers the user didn't ask to close.
+      navStack.splice(navStack.lastIndexOf(name), 1);
+      runCloseImpl(name);
+    } else {
+      // Wasn't tracked (e.g. already closed) — just make sure it's shut.
+      runCloseImpl(name);
+    }
+  }
+
+  function runCloseImpl(name) {
+    switch (name) {
+      case 'ledger': backToOverview(); break;
+      case 'membersModal': closeMembersModal(); break;
+      case 'quickAddModal': closeQuickAddModal(); break;
+      case 'exportModal': closeExportModal(); break;
+      case 'importPasscodeModal': closeImportPasscodeModal(); break;
+      case 'changePasscodeModal': closeChangePasscodeModal(); break;
+      case 'attachmentViewerModal': closeAttachmentViewer(); break;
+    }
+  }
+
+  window.addEventListener('popstate', () => {
+    const name = navStack.pop();
+    if (name) runCloseImpl(name);
+  });
+
+  // Desktop-friendly equivalent: Escape closes whatever's on top, via
+  // the same single path as the back button / Close buttons.
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && navStack.length) {
+      requestCloseLayer(navStack[navStack.length - 1]);
+    }
+  });
 
   // ============================================================
   // DOM Elements
@@ -1029,6 +1115,7 @@
     document.getElementById('newPasscodeConfirmInput').value = '';
     document.getElementById('changePasscodeError').style.display = 'none';
     document.getElementById('changePasscodeModal').classList.add('open');
+    pushNavLayer('changePasscodeModal');
   }
 
   function closeChangePasscodeModal() {
@@ -1074,7 +1161,7 @@
       const verify = await encryptObject(VAULT_CHECK_STRING);
       await saveVaultMeta({ salt: newSalt, verify, iterations: PBKDF2_ITERATIONS });
 
-      closeChangePasscodeModal();
+      requestCloseLayer('changePasscodeModal');
       alert('Passcode updated successfully.');
     } catch (err) {
       console.error(err);
@@ -1230,8 +1317,18 @@
     ledgerType = type;
     currentMemberId = memberId;
 
+    const cameFromOverview = ledgerView.style.display !== 'block';
+
     overviewView.style.display = 'none';
     ledgerView.style.display = 'block';
+
+    if (opts.replaceNavFrom) {
+      // Came here directly from another overlay (e.g. Quick Add) as one
+      // user action — swap that layer for 'ledger' instead of stacking.
+      replaceNavLayer(opts.replaceNavFrom, 'ledger');
+    } else if (cameFromOverview) {
+      pushNavLayer('ledger');
+    }
 
     const members = await getMembers();
     const member = members.find(m => m.id === memberId);
@@ -1304,6 +1401,7 @@
   async function openMembersModal() {
     await renderMembersModalList();
     document.getElementById('membersModal').classList.add('open');
+    pushNavLayer('membersModal');
   }
 
   async function closeMembersModal() {
@@ -1387,7 +1485,15 @@
     await deleteMemberCascade(id);
 
     if (currentMemberId === id) currentMemberId = null;
-    if (ledgerMemberId === id) await backToOverview();
+    if (ledgerMemberId === id) {
+      // Force-closing the Ledger here (its member no longer exists),
+      // possibly while the Members modal is still open on top of it.
+      // Just drop 'ledger' from our bookkeeping — its own history entry
+      // is harmless to leave behind and will be skipped over silently.
+      const idx = navStack.lastIndexOf('ledger');
+      if (idx !== -1) navStack.splice(idx, 1);
+      await backToOverview();
+    }
 
     await renderMembersModalList();
     await populateOwnerFilter();
@@ -1429,6 +1535,7 @@
     memberSelect.innerHTML = members.map(m => `<option value="${m.id}">${escapeHtml(m.name)}</option>`).join('');
     await updateQuickAddTypeOptions();
     document.getElementById('quickAddModal').classList.add('open');
+    pushNavLayer('quickAddModal');
   }
 
   async function updateQuickAddTypeOptions() {
@@ -1455,7 +1562,7 @@
     if (!type) { alert('This member has no tax types enabled. Edit them via "👥 Members" first.'); return; }
 
     closeQuickAddModal();
-    await openLedger(memberId, type, { autoExpandForm: true });
+    await openLedger(memberId, type, { autoExpandForm: true, replaceNavFrom: 'quickAddModal' });
   }
 
   // ============================================================
@@ -1967,7 +2074,7 @@
     openMembersBtn: () => openMembersModal(),
     printReportBtn: () => printCurrentView(),
     openQuickAddBtn: () => openQuickAddModal(),
-    backToOverviewBtn: () => backToOverview(),
+    backToOverviewBtn: () => requestCloseLayer('ledger'),
     printLedgerBtn: () => printCurrentView(),
     toggleLhdnFormBtn: () => toggleLhdnForm(),
     cancelEditBtn: () => resetForm(),
@@ -1976,16 +2083,16 @@
     toggleIrasFormBtn: () => toggleIrasForm(),
     cancelIrasEditBtn: () => resetIrasForm(),
     addMemberBtn: () => addMemberFromModal(),
-    closeMembersModalBtn: () => closeMembersModal(),
-    closeQuickAddModalBtn: () => closeQuickAddModal(),
+    closeMembersModalBtn: () => requestCloseLayer('membersModal'),
+    closeQuickAddModalBtn: () => requestCloseLayer('quickAddModal'),
     quickAddGoBtn: () => quickAddGo(),
-    closeChangePasscodeModalBtn: () => closeChangePasscodeModal(),
+    closeChangePasscodeModalBtn: () => requestCloseLayer('changePasscodeModal'),
     changePasscodeBtn: () => handleChangePasscode(),
-    closeExportModalBtn: () => closeExportModal(),
+    closeExportModalBtn: () => requestCloseLayer('exportModal'),
     performExportBtn: () => performExport(),
-    closeImportPasscodeModalBtn: () => closeImportPasscodeModal(),
+    closeImportPasscodeModalBtn: () => requestCloseLayer('importPasscodeModal'),
     decryptImportBtn: () => decryptAndImport(),
-    closeAttachmentViewerBtn: () => closeAttachmentViewer(),
+    closeAttachmentViewerBtn: () => requestCloseLayer('attachmentViewerModal'),
     lhdnAttachmentAddBtn: () => document.getElementById('lhdnAttachmentInput').click(),
     irasAttachmentAddBtn: () => document.getElementById('irasAttachmentInput').click(),
   };
