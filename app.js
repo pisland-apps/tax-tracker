@@ -3,18 +3,17 @@
   // bottom-right corner — visible even on the lock screen before the
   // passcode is entered, so a stale cached build is obvious at a glance).
   //
-  // This is INTENTIONALLY separate from CACHE_VERSION in sw.js — one is a
-  // human-readable label, the other drives the Service Worker's cache-
-  // busting. They do NOT sync automatically since they live in different
-  // files. Bump BOTH together on every deploy that touches app.js or
-  // index.html — see the matching reminder comment in sw.js.
+  // Kept numerically IN SYNC with CACHE_VERSION in sw.js on purpose —
+  // they live in different files and don't sync automatically, so bump
+  // BOTH to the same number by hand on every deploy that touches app.js
+  // or index.html. See the matching reminder comment in sw.js.
   //
   // If the badge you see after deploying doesn't match this value, that's
   // the signal to hard-refresh (Ctrl/Cmd+Shift+R) or clear the site's
   // Service Worker/cache in devtools — it means the browser is still
   // running an old cached build, not that the deploy failed.
   // ============================================================
-  const APP_VERSION = 'v1.1.0';
+  const APP_VERSION = 'v6';
   const APP_VERSION_DATE = '2026-08-09';
 
   (function initVersionBadge() {
@@ -864,6 +863,23 @@
 
   // Basic HTML escaping to avoid broken markup / injection when names contain
   // special characters (<, >, quotes, etc.) since values are inserted via innerHTML.
+  // Renders an optional free-text note as small text. If it looks like a
+  // comma-separated list (contains a comma), each item becomes its own
+  // bullet instead of one run-on line. Returns '' when there's no note,
+  // so callers can just concatenate it in without an extra "if" of their own.
+  function renderNoteHtml(note) {
+    if (!note) return '';
+    const trimmed = note.trim();
+    if (!trimmed) return '';
+    if (trimmed.includes(',')) {
+      const items = trimmed.split(',').map(s => s.trim()).filter(Boolean);
+      if (items.length > 1) {
+        return '<ul class="note-list">' + items.map(i => `<li>${escapeHtml(i)}</li>`).join('') + '</ul>';
+      }
+    }
+    return `<small class="note-text">${escapeHtml(trimmed)}</small>`;
+  }
+
   function escapeHtml(str) {
     return String(str)
       .replace(/&/g, '&amp;')
@@ -1452,11 +1468,13 @@
     const irasNoaVal = document.getElementById('irasNoa').value.trim();
     const irasNoaIncomeVal = document.getElementById('irasNoaIncome').value;
     const irasTaxPaymentVal = document.getElementById('irasTaxPayment').value;
+    const irasNoteVal = document.getElementById('irasNote').value.trim();
 
     const irasYearSubmit = irasYearSubmitVal !== '' ? parseInt(irasYearSubmitVal, 10) : null;
     const irasNoa = irasNoaVal !== '' ? irasNoaVal : null;
     const irasNoaIncome = irasNoaIncomeVal !== '' ? parseFloat(irasNoaIncomeVal) : null;
     const irasTaxPayment = irasTaxPaymentVal !== '' ? parseFloat(irasTaxPaymentVal) : null;
+    const irasNote = irasNoteVal !== '' ? irasNoteVal : null;
 
     const irasRecord = {
       memberId: currentMemberId,
@@ -1465,6 +1483,7 @@
       noa: irasNoa,
       noaIncome: irasNoaIncome,
       taxPayment: irasTaxPayment,
+      note: irasNote,
       attachments: collectAttachmentsForSave('iras')
     };
 
@@ -1488,6 +1507,7 @@
     document.getElementById('irasNoa').value = record.noa || '';
     document.getElementById('irasNoaIncome').value = record.noaIncome !== null && record.noaIncome !== undefined ? record.noaIncome : '';
     document.getElementById('irasTaxPayment').value = record.taxPayment !== null && record.taxPayment !== undefined ? record.taxPayment : '';
+    document.getElementById('irasNote').value = record.note || '';
 
     loadAttachmentStateForEdit('iras', record.attachments);
 
@@ -1798,7 +1818,7 @@
       const attachmentsHtml = (Array.isArray(r.attachments) && r.attachments.length > 0)
         ? r.attachments.map((att, i) => `<div class="attachment-chip-inline no-print"><button type="button" class="attachment-link-btn" data-action="open-record-attachment" data-kind="iras" data-id="${r.id}" data-idx="${i}">📎 <small>${escapeHtml(att.name || 'attachment')}</small></button></div>`).join('')
         : '';
-      const noaStr = (r.noa ? `<span class="badge badge-iras">${escapeHtml(r.noa)}</span>` : '<span style="color: var(--text-muted);">-</span>') + (attachmentsHtml ? '<br>' + attachmentsHtml : '');
+      const noaStr = (r.noa ? `<span class="badge badge-iras">${escapeHtml(r.noa)}</span>` : '<span style="color: var(--text-muted);">-</span>') + (renderNoteHtml(r.note) ? '<br>' + renderNoteHtml(r.note) : '') + (attachmentsHtml ? '<br>' + attachmentsHtml : '');
       const noaIncomeStr = (r.noaIncome !== null && r.noaIncome !== undefined) ? formatCurrency(r.noaIncome, 'SGD') : '-';
       const taxPaymentStr = (r.taxPayment !== null && r.taxPayment !== undefined) ? formatCurrency(r.taxPayment, 'SGD') : '-';
       const netIncome = (r.noaIncome || 0) - (r.taxPayment || 0);

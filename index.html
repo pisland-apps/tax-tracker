@@ -93,8 +93,8 @@
 
     .form-group { display: flex; flex-direction: column; gap: 0.35rem; margin-bottom: 1rem; }
     label { font-size: 0.875rem; font-weight: 500; color: var(--text-muted); }
-    input, select { padding: 0.6rem; border: 1px solid var(--border); border-radius: var(--radius); font-size: 0.95rem; outline: none; }
-    input:focus, select:focus { border-color: var(--primary); }
+    input, select, textarea { padding: 0.6rem; border: 1px solid var(--border); border-radius: var(--radius); font-size: 0.95rem; outline: none; font-family: inherit; }
+    input:focus, select:focus, textarea:focus { border-color: var(--primary); }
 
     .btn { background: var(--primary); color: white; border: none; padding: 0.6rem 1.2rem; border-radius: var(--radius); font-weight: 500; cursor: pointer; transition: background 0.2s; display: inline-flex; align-items: center; gap: 0.4rem; font-size: 0.9rem; }
     .btn:hover { background: var(--primary-hover); }
@@ -244,6 +244,11 @@
     .attachment-link-btn { background: none; border: none; cursor: pointer; color: var(--primary); padding: 0; font-size: 0.8rem; display: inline-flex; align-items: center; gap: 0.2rem; text-align: left; }
     .attachment-link-btn:hover { text-decoration: underline; }
     .attachment-link-btn small { color: inherit; }
+
+    /* Record notes (currently IRAS only) */
+    .note-text { display: block; color: var(--text-muted); font-style: italic; margin-top: 0.15rem; }
+    .note-list { margin: 0.15rem 0 0 1.1rem; padding: 0; color: var(--text-muted); font-size: 0.8rem; font-style: italic; }
+    .note-list li { margin-bottom: 0.1rem; }
 
     /* Attachment Viewer Modal */
     .av-modal-card { background: var(--card-bg); border-radius: var(--radius); max-width: 800px; width: 100%; max-height: 90vh; display: flex; flex-direction: column; box-shadow: 0 10px 40px rgba(0,0,0,0.25); }
@@ -566,6 +571,11 @@
             <div class="form-group">
               <label for="irasTaxPayment">Tax Payment <span style="font-weight:400; color: var(--text-muted);">(optional)</span></label>
               <input type="number" step="0.01" id="irasTaxPayment" placeholder="Tax payment (S$)">
+            </div>
+
+            <div class="form-group">
+              <label for="irasNote">Note <span style="font-weight:400; color: var(--text-muted);">(optional — separate items with commas for a bulleted list)</span></label>
+              <textarea id="irasNote" rows="2" placeholder="e.g. Late filing penalty waived, Reassessment pending"></textarea>
             </div>
 
             <div class="form-group">
