@@ -778,7 +778,9 @@
   than a CDN edge copy). Same-origin 'self' scripts aren't subject to
   SRI in the first place, so there's no integrity= hash to keep in sync
   here. Trust is anchored once, at vendoring time (see README for how to
-  update this file), not on every page load against a CDN.
+  update this file, and for a documentation-only SHA-256 of both
+  ./lib/*.js files to check against if you ever want to confirm they
+  weren't altered post-vendoring).
 
   ./lib/pdf.worker.min.js (configured in app.js) is the matching worker
   build from the same package — keep both files' versions in lockstep

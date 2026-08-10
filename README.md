@@ -73,6 +73,25 @@ Every time `app.js` or `index.html` changes, before shipping:
    keep `pdf.min.js` and `pdf.worker.min.js` on the *same* version, add
    both new files to `APP_SHELL` in `sw.js` if their filenames changed,
    and bump `CACHE_VERSION`/`APP_VERSION` per steps 1–2 above so the new
+   files get picked up by returning visitors. **Also update the checksums
+   below** — recompute with:
+   ```
+   openssl dgst -sha256 lib/pdf.min.js
+   openssl dgst -sha256 lib/pdf.worker.min.js
+   ```
+   These are a documentation-only record for verifying the vendored
+   files weren't corrupted/altered after fetching — not a live
+   `integrity=` attribute (same-origin `'self'` scripts aren't subject
+   to SRI, and pinning it there would just add a way for the app to
+   break silently on a stale/mismatched hash with no upside, since same
+   origin has nothing external to protect against). Current pdfjs-dist
+   version: **3.11.174**.
+
+   | File | SHA-256 |
+   |---|---|
+   | `lib/pdf.min.js` | `5b5799e6f8c680663207ac5b42ee14eed2a406fa7af48f50c154f0c0b1566946` |
+   | `lib/pdf.worker.min.js` | `feabdf309770ed24bba31a5467836cdc8cf639c705af27d52b585b041bb8527b` |
+
    files actually reach returning visitors.
 
 ## Attachments
