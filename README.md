@@ -40,6 +40,40 @@ restricted to secure contexts (`https://`, or `http://localhost`). Opening
 available" error. Use GitHub Pages, or run a local server
 (`python3 -m http.server`) for local testing.
 
+## Security headers (`_headers` file)
+
+`_headers` at the repo root sets real HTTP response headers — this only
+works if the site is served by **Cloudflare Pages** (a GitHub repo
+connected to Cloudflare Pages for build/deploy), not plain GitHub Pages.
+GitHub Pages itself has no mechanism for custom headers at all, so if
+this repo is ever pointed back at GitHub Pages directly (or moved to a
+host that doesn't read a `_headers` file), these stop applying silently
+— worth a quick check in the Network tab (any response header starting
+`x-frame-options`/`content-security-policy`) after deploying to confirm
+they're actually live, since there's no visible error if they're not.
+
+Why this file exists alongside the `<meta http-equiv="Content-Security-
+Policy">` tag in `index.html`: `<meta>` CSP can't carry `frame-ancestors`
+— browsers only honor that directive from a real HTTP header — so the
+`<meta>` tag alone can't stop this app from being embedded in another
+site's `<iframe>` (clickjacking). `_headers` adds the same CSP again as
+an actual header (this time including `frame-ancestors 'none'`), plus:
+
+- `X-Frame-Options: DENY` — old-browser fallback for the same
+  anti-embedding protection `frame-ancestors` provides.
+- `X-Content-Type-Options: nosniff` — stops the browser from
+  reinterpreting a file as a different content-type than served.
+- `Referrer-Policy: no-referrer` — never leaks this page's URL to an
+  outbound request (there aren't any here, but future-proofs it).
+- `Permissions-Policy: camera=(), microphone=(), geolocation=(), payment=()`
+  — disables browser APIs this app never uses, so even a successful XSS
+  couldn't invoke them.
+
+**Keep both CSPs in sync.** If `script-src`/`img-src`/etc. in the
+`<meta>` tag in `index.html` ever changes, make the same edit to the
+`Content-Security-Policy` line in `_headers` — they're independent
+copies and won't drift-detect each other.
+
 ## Deploy checklist — versioning
 
 Every time `app.js` or `index.html` changes, before shipping:
