@@ -9,7 +9,7 @@
 // label shown in the bottom-right version badge) on purpose — they live
 // in different files and don't sync automatically, so bump BOTH to the
 // same number by hand on every deploy that touches app.js or index.html.
-const CACHE_VERSION = 11;
+const CACHE_VERSION = 12;
 const CACHE_NAME = `tax-tracker-cache-v${CACHE_VERSION}`;
 
 const APP_SHELL = [
@@ -19,8 +19,9 @@ const APP_SHELL = [
   './manifest.json',
   './icons/icon-192.png',
   './icons/icon-512.png',
-  './lib/pdf.min.js',
-  './lib/pdf.worker.min.js'
+  './lib/pdf-loader.mjs',
+  './lib/pdf.min.mjs',
+  './lib/pdf.worker.min.mjs'
 ];
 
 self.addEventListener('install', (event) => {

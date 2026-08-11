@@ -94,24 +94,34 @@ Every time `app.js` or `index.html` changes, before shipping:
    that's a signal to hard-refresh (Ctrl/Cmd+Shift+R) or clear the site's
    Service Worker/cache in devtools — not that the deploy failed.
 4. pdf.js (used for the in-app attachment viewer) is vendored locally at
-   `./lib/pdf.min.js` and `./lib/pdf.worker.min.js` — not loaded from a
+   `./lib/pdf.min.mjs` and `./lib/pdf.worker.min.mjs` — not loaded from a
    CDN, so there's no `integrity=` hash to maintain and the CSP's
-   `script-src`/`worker-src` stay `'self'`-only. To update pdf.js to a
-   newer version:
+   `script-src`/`worker-src` stay `'self'`-only.
+
+   Note: pdfjs-dist stopped shipping a classic/UMD build from v4.0.0
+   onward (it's ESM-only now), so there's a third small file,
+   `./lib/pdf-loader.mjs` — a module shim that imports `pdf.min.mjs` and
+   assigns it to `window.pdfjsLib`, so `app.js` (a classic script) can
+   keep reading a plain global the same way it always did. You don't
+   need to touch `pdf-loader.mjs` when updating pdf.js versions, only
+   the two vendored library files.
+
+   To update pdf.js to a newer version:
    ```
    npm pack pdfjs-dist@<version>
    tar xzf pdfjs-dist-<version>.tgz
-   cp package/build/pdf.min.js package/build/pdf.worker.min.js ./lib/
+   cp package/build/pdf.min.mjs package/build/pdf.worker.min.mjs ./lib/
    ```
    Pull from the official npm package (not a random CDN/GitHub mirror),
-   keep `pdf.min.js` and `pdf.worker.min.js` on the *same* version, add
-   both new files to `APP_SHELL` in `sw.js` if their filenames changed,
-   and bump `CACHE_VERSION`/`APP_VERSION` per steps 1–2 above so the new
-   files get picked up by returning visitors. **Also update the checksums
-   below** — recompute with:
+   keep `pdf.min.mjs` and `pdf.worker.min.mjs` on the *same* version, add
+   any new/renamed files to `APP_SHELL` in `sw.js`, and bump
+   `CACHE_VERSION`/`APP_VERSION` per steps 1–2 above so the new files get
+   picked up by returning visitors. **Also update the checksums below**
+   — recompute with:
    ```
-   openssl dgst -sha256 lib/pdf.min.js
-   openssl dgst -sha256 lib/pdf.worker.min.js
+   openssl dgst -sha256 lib/pdf.min.mjs
+   openssl dgst -sha256 lib/pdf.worker.min.mjs
+   openssl dgst -sha256 lib/pdf-loader.mjs
    ```
    These are a documentation-only record for verifying the vendored
    files weren't corrupted/altered after fetching — not a live
@@ -119,12 +129,17 @@ Every time `app.js` or `index.html` changes, before shipping:
    to SRI, and pinning it there would just add a way for the app to
    break silently on a stale/mismatched hash with no upside, since same
    origin has nothing external to protect against). Current pdfjs-dist
-   version: **3.11.174**.
+   version: **4.10.38** (updated from 3.11.174, which predated the fix
+   for CVE-2024-4367 — a crafted-PDF arbitrary-JS-execution bug in
+   pdf.js's font handling; this app's CSP already blocked the
+   eval/Function path it relied on, but the vendored copy should still
+   track a patched release rather than lean on that alone).
 
    | File | SHA-256 |
    |---|---|
-   | `lib/pdf.min.js` | `5b5799e6f8c680663207ac5b42ee14eed2a406fa7af48f50c154f0c0b1566946` |
-   | `lib/pdf.worker.min.js` | `feabdf309770ed24bba31a5467836cdc8cf639c705af27d52b585b041bb8527b` |
+   | `lib/pdf.min.mjs` | `27fc2a057a00f92a4334ad06e17dbd7259912954e9fb7f76400bcca5fd190a9c` |
+   | `lib/pdf.worker.min.mjs` | `1baa1844c89c80a5b2797c916e75ab29254be46d8e9cb53cb6364d7aad84be36` |
+   | `lib/pdf-loader.mjs` | `c578398411d31ea81a7649351379c68d79a4052de7579240d2e6c62ce220f860` |
 
    files actually reach returning visitors.
 
@@ -157,6 +172,12 @@ a database that already has others.
   random salt — so a backup stays importable even after you later change
   your app passcode. You can toggle a backup to be plaintext instead, in
   which case a warning is shown before export.
+- **Idle auto-lock**: the ⏱️ Auto-lock dropdown in the header (Never / 1 /
+  5 / 15 / 30 min) clears the in-memory encryption key and returns to the
+  lock screen after that many minutes with no mouse/keyboard/touch
+  activity. Defaults to 15 minutes on first setup. The choice is saved
+  per-device in the local vault metadata (unencrypted — it's just a UI
+  preference), and is preserved across a passcode change.
 
 ## License
 

@@ -13,23 +13,33 @@
   // Service Worker/cache in devtools — it means the browser is still
   // running an old cached build, not that the deploy failed.
   // ============================================================
-  const APP_VERSION = 'v11';
-  const APP_VERSION_DATE = '2026-08-09';
+  const APP_VERSION = 'v12';
+  const APP_VERSION_DATE = '2026-08-11';
 
   (function initVersionBadge() {
     const el = document.getElementById('versionBadge');
     if (el) el.textContent = `${APP_VERSION} · ${APP_VERSION_DATE}`;
   })();
 
-  // pdf.js worker — vendored locally at ./lib/pdf.worker.min.js, from the
-  // same pdfjs-dist 3.11.174 package as ./lib/pdf.min.js loaded in
-  // index.html. Must stay the same version as that file — mismatched
-  // main/worker builds can fail in confusing ways. Used by the in-app
-  // attachment viewer to render PDFs onto <canvas> instead of relying on
-  // the browser's own PDF handling (which can silently download instead
-  // of preview, or render blank in an iframe).
-  if (window.pdfjsLib) {
-    pdfjsLib.GlobalWorkerOptions.workerSrc = 'lib/pdf.worker.min.js';
+  // pdf.js — vendored locally at ./lib/pdf.min.mjs + ./lib/pdf.worker.min.mjs
+  // (loaded via the ./lib/pdf-loader.mjs module shim in index.html, which
+  // assigns the import to window.pdfjsLib). Used by the in-app attachment
+  // viewer to render PDFs onto <canvas> instead of relying on the browser's
+  // own PDF handling (which can silently download instead of preview, or
+  // render blank in an iframe).
+  //
+  // NOTE: unlike the old UMD build, the module shim loads as a deferred
+  // <script type="module">, which runs *after* this classic script — so
+  // window.pdfjsLib is NOT guaranteed to exist yet at this point in app.js.
+  // Don't read it here at parse time. ensurePdfWorkerConfigured() below is
+  // called lazily, right before pdf.js is actually used (when a user opens
+  // a PDF attachment), by which point the module has long since loaded.
+  function ensurePdfWorkerConfigured() {
+    if (!window.pdfjsLib) return false;
+    if (!pdfjsLib.GlobalWorkerOptions.workerSrc) {
+      pdfjsLib.GlobalWorkerOptions.workerSrc = 'lib/pdf.worker.min.mjs';
+    }
+    return true;
   }
 
   // ============================================================
@@ -46,6 +56,37 @@
   let ledgerMemberId = null;
   let ledgerType = null;        // 'lhdn' | 'iras'
   let currentMemberBirthYear = null; // cached for the open Ledger's Age column
+
+  // ============================================================
+  // Idle Auto-Lock
+  // ============================================================
+  // Clears vaultKey (via lockApp) after N minutes of no mouse/keyboard/touch
+  // activity, so an unlocked session left open on a shared or mobile device
+  // doesn't sit decrypted indefinitely. The chosen value is persisted in
+  // vault meta (unencrypted — it's a UI preference, not sensitive data) so
+  // it survives reloads. 0 disables it.
+  const DEFAULT_IDLE_LOCK_MINUTES = 15;
+  let idleLockMinutes = DEFAULT_IDLE_LOCK_MINUTES;
+  let idleTimer = null;
+
+  function resetIdleTimer() {
+    if (idleTimer) { clearTimeout(idleTimer); idleTimer = null; }
+    if (!vaultKey || !idleLockMinutes) return; // locked, or auto-lock set to "Never"
+    idleTimer = setTimeout(() => {
+      lockApp();
+    }, idleLockMinutes * 60 * 1000);
+  }
+
+  function stopIdleTimer() {
+    if (idleTimer) { clearTimeout(idleTimer); idleTimer = null; }
+  }
+
+  // Registered once, unconditionally — resetIdleTimer() itself is a no-op
+  // while locked (vaultKey is null), so this is safe to listen for even
+  // before setup/unlock, and cheap since it only ever clears+sets a timeout.
+  ['mousedown', 'mousemove', 'keydown', 'touchstart', 'scroll', 'wheel'].forEach(evt => {
+    window.addEventListener(evt, resetIdleTimer, { passive: true });
+  });
 
   function showFatalError(msg) {
     const el = document.getElementById('appErrorBanner');
@@ -159,6 +200,16 @@
       const request = store.put({ id: 'vault', ...meta });
       request.onsuccess = () => resolve();
     });
+  }
+
+  // Persists just the idle-auto-lock preference without touching the
+  // salt/verify/iterations fields — reads the current meta record first
+  // and writes it back with only idleLockMinutes changed, since
+  // saveVaultMeta() replaces the whole record rather than patching it.
+  async function saveIdleLockMinutes(minutes) {
+    const meta = await getVaultMeta();
+    if (!meta) return; // shouldn't happen post-unlock, but don't crash if it does
+    await saveVaultMeta({ ...meta, idleLockMinutes: minutes });
   }
 
   // Returns the derived CryptoKey if the passcode is correct, or null if not.
@@ -698,6 +749,11 @@
         img.style.borderRadius = 'var(--radius)';
         content.appendChild(img);
       } else if (isPdf) {
+        if (!ensurePdfWorkerConfigured()) {
+          content.innerHTML = '';
+          content.textContent = 'PDF viewer failed to load. Try reloading the page.';
+          return;
+        }
         const bytes = dataURLtoUint8Array(att.data);
         const pdf = await pdfjsLib.getDocument({ data: bytes }).promise;
         content.innerHTML = '';
@@ -1064,7 +1120,7 @@
       const salt = bufToB64(crypto.getRandomValues(new Uint8Array(16)));
       vaultKey = await deriveKeyFromPasscode(p1, salt, PBKDF2_ITERATIONS);
       const verify = await encryptObject(VAULT_CHECK_STRING);
-      await saveVaultMeta({ salt, verify, iterations: PBKDF2_ITERATIONS });
+      await saveVaultMeta({ salt, verify, iterations: PBKDF2_ITERATIONS, idleLockMinutes: DEFAULT_IDLE_LOCK_MINUTES });
 
       // Encrypt any pre-existing plaintext data from before this feature existed.
       await migrateLegacyDataToEncrypted();
@@ -1099,6 +1155,7 @@
   }
 
   function lockApp() {
+    stopIdleTimer();
     vaultKey = null;
     currentMemberId = null;
     ledgerMemberId = null;
@@ -1159,7 +1216,7 @@
       for (const r of irasRecords) await saveIrasRecordToDB(r);
 
       const verify = await encryptObject(VAULT_CHECK_STRING);
-      await saveVaultMeta({ salt: newSalt, verify, iterations: PBKDF2_ITERATIONS });
+      await saveVaultMeta({ salt: newSalt, verify, iterations: PBKDF2_ITERATIONS, idleLockMinutes: meta.idleLockMinutes });
 
       requestCloseLayer('changePasscodeModal');
       alert('Passcode updated successfully.');
@@ -1183,6 +1240,21 @@
     }
     await populateOwnerFilter();
     await renderOverviewCards();
+
+    const meta = await getVaultMeta();
+    idleLockMinutes = (meta && Number.isFinite(meta.idleLockMinutes))
+      ? meta.idleLockMinutes
+      : DEFAULT_IDLE_LOCK_MINUTES;
+    const idleLockSelect = document.getElementById('idleLockSelect');
+    if (idleLockSelect) idleLockSelect.value = String(idleLockMinutes);
+    resetIdleTimer();
+  }
+
+  async function handleIdleLockChange() {
+    const select = document.getElementById('idleLockSelect');
+    idleLockMinutes = parseInt(select.value, 10) || 0;
+    await saveIdleLockMinutes(idleLockMinutes);
+    resetIdleTimer();
   }
 
   async function populateOwnerFilter() {
@@ -2101,6 +2173,9 @@
     if (el) el.addEventListener('click', handler);
     else console.warn(`Event wiring: #${id} not found in DOM.`);
   });
+
+  const idleLockSelectEl = document.getElementById('idleLockSelect');
+  if (idleLockSelectEl) idleLockSelectEl.addEventListener('change', handleIdleLockChange);
 
   // Dynamically re-rendered elements (records table, IRAS table, members
   // list, overview cards, income-source rows) carry a data-action

@@ -281,11 +281,11 @@
       <p>Set a passcode to encrypt and protect your tax records on this device. This passcode is never stored — if you forget it, your encrypted records cannot be recovered.</p>
       <div class="form-group">
         <label for="setupPasscode">New Passcode (min. 6 characters)</label>
-        <input type="password" id="setupPasscode" placeholder="Choose a passcode">
+        <input type="password" id="setupPasscode" placeholder="Choose a passcode" autocomplete="new-password">
       </div>
       <div class="form-group">
         <label for="setupPasscodeConfirm">Confirm Passcode</label>
-        <input type="password" id="setupPasscodeConfirm" placeholder="Re-enter passcode">
+        <input type="password" id="setupPasscodeConfirm" placeholder="Re-enter passcode" autocomplete="new-password">
       </div>
       <button class="btn" style="width: 100%; justify-content: center;" id="setupPasscodeBtn">Set Passcode &amp; Continue</button>
     </div>
@@ -294,7 +294,7 @@
       <p>Enter your passcode to unlock your records.</p>
       <div class="form-group">
         <label for="unlockPasscode">Passcode</label>
-        <input type="password" id="unlockPasscode" placeholder="Passcode">
+        <input type="password" id="unlockPasscode" placeholder="Passcode" autocomplete="current-password">
       </div>
       <button class="btn" style="width: 100%; justify-content: center;" id="unlockBtn">Unlock</button>
     </div>
@@ -318,6 +318,16 @@
       <button class="btn btn-secondary" id="importJsonBtn">📤 Import JSON</button>
       <input type="file" id="importFileInput" accept=".json" style="display: none;">
       <button class="btn btn-secondary" id="changePasscodeMenuBtn">🔑 Change Passcode</button>
+      <label for="idleLockSelect" style="display:flex; align-items:center; gap:0.4em; font-size:0.85em; color:var(--text-secondary,#666);">
+        ⏱️ Auto-lock
+        <select id="idleLockSelect" title="Automatically lock after this many minutes of no activity">
+          <option value="0">Never</option>
+          <option value="1">1 min</option>
+          <option value="5">5 min</option>
+          <option value="15">15 min</option>
+          <option value="30">30 min</option>
+        </select>
+      </label>
       <button class="btn btn-secondary" id="lockAppBtn">🔒 Lock</button>
     </div>
   </div>
@@ -676,15 +686,15 @@
     <h2>Change Passcode</h2>
     <div class="form-group">
       <label for="currentPasscodeInput">Current Passcode</label>
-      <input type="password" id="currentPasscodeInput" placeholder="Current passcode">
+      <input type="password" id="currentPasscodeInput" placeholder="Current passcode" autocomplete="current-password">
     </div>
     <div class="form-group">
       <label for="newPasscodeInput">New Passcode (min. 6 characters)</label>
-      <input type="password" id="newPasscodeInput" placeholder="New passcode">
+      <input type="password" id="newPasscodeInput" placeholder="New passcode" autocomplete="new-password">
     </div>
     <div class="form-group">
       <label for="newPasscodeConfirmInput">Confirm New Passcode</label>
-      <input type="password" id="newPasscodeConfirmInput" placeholder="Re-enter new passcode">
+      <input type="password" id="newPasscodeConfirmInput" placeholder="Re-enter new passcode" autocomplete="new-password">
     </div>
     <div id="changePasscodeError" class="lock-error" style="display: none;"></div>
     <div class="modal-actions">
@@ -717,11 +727,11 @@
     <div id="exportEncryptFields">
       <div class="form-group">
         <label for="exportPasscode">Backup Passcode (min. 6 characters)</label>
-        <input type="password" id="exportPasscode" placeholder="Set a passcode for this backup file">
+        <input type="password" id="exportPasscode" placeholder="Set a passcode for this backup file" autocomplete="off">
       </div>
       <div class="form-group">
         <label for="exportPasscodeConfirm">Confirm Backup Passcode</label>
-        <input type="password" id="exportPasscodeConfirm" placeholder="Re-enter passcode">
+        <input type="password" id="exportPasscodeConfirm" placeholder="Re-enter passcode" autocomplete="off">
       </div>
       <p style="font-size: 0.8rem; color: var(--text-muted);">This backup file will need this passcode to be imported later. It can be different from your app unlock passcode.</p>
     </div>
@@ -746,7 +756,7 @@
     <p style="font-size: 0.85rem; color: var(--text-muted); margin-bottom: 1rem;">This backup file is encrypted. Enter the backup passcode to import it.</p>
     <div class="form-group">
       <label for="importBackupPasscode">Backup Passcode</label>
-      <input type="password" id="importBackupPasscode" placeholder="Backup passcode">
+      <input type="password" id="importBackupPasscode" placeholder="Backup passcode" autocomplete="off">
     </div>
     <div id="importPasscodeError" class="lock-error" style="display: none;"></div>
     <div class="modal-actions">
@@ -771,22 +781,40 @@
 </div>
 <!--
   pdf.js is loaded here (rather than left to app.js) so pdfjsLib exists
-  before app.js runs and configures its worker.
+  before app.js needs it.
 
-  Vendored locally at ./lib/pdf.min.js (pdfjs-dist 3.11.174, pulled from
+  Vendored locally at ./lib/pdf.min.mjs (pdfjs-dist 4.10.38, pulled from
   the official npm registry — Mozilla's own publish of pdf.js — rather
   than a CDN edge copy). Same-origin 'self' scripts aren't subject to
   SRI in the first place, so there's no integrity= hash to keep in sync
   here. Trust is anchored once, at vendoring time (see README for how to
   update this file, and for a documentation-only SHA-256 of both
-  ./lib/*.js files to check against if you ever want to confirm they
-  weren't altered post-vendoring).
+  ./lib/*.mjs files to check against if you ever want to confirm they
+  weren't altered post-vendoring). Upgraded from 3.11.174 → 4.10.38 to
+  pick up the fix for CVE-2024-4367 (arbitrary JS execution via a
+  crafted PDF's font data); this app's CSP (script-src 'self', no
+  'unsafe-eval') already blocked the eval/Function path that CVE relied
+  on, but the vendored copy should still track a patched release rather
+  than depend on that as the only line of defense.
 
-  ./lib/pdf.worker.min.js (configured in app.js) is the matching worker
-  build from the same package — keep both files' versions in lockstep
-  when updating.
+  pdfjs-dist stopped shipping a classic/UMD build from v4 onward — it's
+  ESM-only now. ./lib/pdf-loader.mjs is a small module-type shim (the
+  only <script type="module"> in this app) that imports pdf.min.mjs and
+  assigns it to window.pdfjsLib, so app.js (a classic script) can keep
+  reading a plain global exactly as before. Module scripts execute
+  after the document parses, and *after* any classic script that
+  appears later in the document — so app.js no longer assumes pdfjsLib
+  is ready at parse time; it's read lazily, at the point a PDF is
+  actually opened (see app.js), by which time the user has already
+  interacted with the page.
+
+  ./lib/pdf.worker.min.mjs (configured in app.js) is the matching
+  worker build from the same package — keep all three files' versions
+  in lockstep when updating. pdf.js loads this worker as an ES module
+  worker itself (new Worker(src, {type: "module"})), which is why
+  worker-src stays 'self' with no other CSP change needed.
 -->
-<script src="lib/pdf.min.js"
+<script type="module" src="lib/pdf-loader.mjs"
   referrerpolicy="no-referrer"></script>
 <script src="app.js"></script>
 </body>
