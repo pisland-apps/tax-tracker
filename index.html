@@ -783,19 +783,16 @@
   pdf.js is loaded here (rather than left to app.js) so pdfjsLib exists
   before app.js needs it.
 
-  Vendored locally at ./lib/pdf.min.mjs (pdfjs-dist 4.10.38, pulled from
+  Vendored locally at ./lib/pdf.min.mjs (pdfjs-dist 6.2.108, pulled from
   the official npm registry — Mozilla's own publish of pdf.js — rather
   than a CDN edge copy). Same-origin 'self' scripts aren't subject to
   SRI in the first place, so there's no integrity= hash to keep in sync
   here. Trust is anchored once, at vendoring time (see README for how to
   update this file, and for a documentation-only SHA-256 of both
   ./lib/*.mjs files to check against if you ever want to confirm they
-  weren't altered post-vendoring). Upgraded from 3.11.174 → 4.10.38 to
-  pick up the fix for CVE-2024-4367 (arbitrary JS execution via a
-  crafted PDF's font data); this app's CSP (script-src 'self', no
-  'unsafe-eval') already blocked the eval/Function path that CVE relied
-  on, but the vendored copy should still track a patched release rather
-  than depend on that as the only line of defense.
+  weren't altered post-vendoring). Upgraded from 4.10.38 → 6.2.108, a
+  routine version bump (not CVE-driven); this app's CSP (script-src
+  'self', no 'unsafe-eval') stays the only line of defense either way.
 
   pdfjs-dist stopped shipping a classic/UMD build from v4 onward — it's
   ESM-only now. ./lib/pdf-loader.mjs is a small module-type shim (the

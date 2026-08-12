@@ -129,16 +129,14 @@ Every time `app.js` or `index.html` changes, before shipping:
    to SRI, and pinning it there would just add a way for the app to
    break silently on a stale/mismatched hash with no upside, since same
    origin has nothing external to protect against). Current pdfjs-dist
-   version: **4.10.38** (updated from 3.11.174, which predated the fix
-   for CVE-2024-4367 — a crafted-PDF arbitrary-JS-execution bug in
-   pdf.js's font handling; this app's CSP already blocked the
-   eval/Function path it relied on, but the vendored copy should still
-   track a patched release rather than lean on that alone).
+   version: **6.2.108** (updated from 4.10.38 — routine version bump,
+   no CVE prompting it; `getDocument`/`GlobalWorkerOptions` usage in
+   `app.js` is unchanged and compatible with this release).
 
    | File | SHA-256 |
    |---|---|
-   | `lib/pdf.min.mjs` | `27fc2a057a00f92a4334ad06e17dbd7259912954e9fb7f76400bcca5fd190a9c` |
-   | `lib/pdf.worker.min.mjs` | `1baa1844c89c80a5b2797c916e75ab29254be46d8e9cb53cb6364d7aad84be36` |
+   | `lib/pdf.min.mjs` | `e0be3863c23c8af2305b16548febd58e7f8874a460253317d7771cddbc1c0f6d` |
+   | `lib/pdf.worker.min.mjs` | `0613f41490dd6aaceed7a93fbbd38c85e6d6aa60474b6588c6e7709cfbe18cb3` |
    | `lib/pdf-loader.mjs` | `c578398411d31ea81a7649351379c68d79a4052de7579240d2e6c62ce220f860` |
 
    files actually reach returning visitors.
