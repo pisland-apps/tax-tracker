@@ -13,8 +13,8 @@
   // Service Worker/cache in devtools — it means the browser is still
   // running an old cached build, not that the deploy failed.
   // ============================================================
-  const APP_VERSION = 'v13';
-  const APP_VERSION_DATE = '2026-08-12';
+  const APP_VERSION = 'v14';
+  const APP_VERSION_DATE = '2026-08-14';
 
   (function initVersionBadge() {
     const el = document.getElementById('versionBadge');
@@ -1096,12 +1096,96 @@
     document.getElementById('setupPasscode').value = '';
     document.getElementById('setupPasscodeConfirm').value = '';
     document.getElementById('unlockPasscode').value = '';
+    resetNumpadState('setup');
+    resetNumpadState('unlock');
     if (mode === 'unlock') {
       setTimeout(() => document.getElementById('unlockPasscode').focus(), 50);
     } else {
       setTimeout(() => document.getElementById('setupPasscode').focus(), 50);
     }
   }
+
+  // ============================================================
+  // Numeric keypad for passcode entry (mobile/tablet friendly).
+  //
+  // Each group ("setup" / "unlock") has its own big on-screen numpad next
+  // to its passcode field(s). Tapping a numpad button writes straight into
+  // the field's .value via JS — it never calls .focus() on the field — so
+  // tapping the keypad can never summon the phone's native keyboard.
+  // inputmode="none" on the fields themselves is a second line of defense
+  // in case someone taps the text field directly.
+  //
+  // A "use keyboard instead" link lets anyone whose passcode contains
+  // letters (existing passcodes weren't required to be numeric-only)
+  // switch a group back to normal typing: it clears inputmode="none",
+  // hides that group's numpad, and focuses the field so the real
+  // keyboard appears on demand.
+  // ============================================================
+  const numpadGroups = {
+    setup: { fields: ['setupPasscode', 'setupPasscodeConfirm'] },
+    unlock: { fields: ['unlockPasscode'] }
+  };
+  const numpadState = {};
+
+  function initNumpad(group) {
+    const cfg = numpadGroups[group];
+    const fieldEls = cfg.fields.map(id => document.getElementById(id));
+    numpadState[group] = { activeField: fieldEls[0], keyboardMode: false };
+
+    fieldEls.forEach(el => {
+      el.addEventListener('focus', () => { numpadState[group].activeField = el; });
+    });
+
+    const numpadEl = document.querySelector(`.numpad[data-numpad-for="${group}"]`);
+    numpadEl.querySelectorAll('.numpad-btn').forEach(btn => {
+      // mousedown (not just click) so we can stop the browser from ever
+      // trying to move focus to the button in a way that could bounce
+      // focus/blur across the field and risk waking the keyboard.
+      btn.addEventListener('mousedown', (e) => e.preventDefault());
+      btn.addEventListener('click', () => {
+        const target = numpadState[group].activeField;
+        if (!target) return;
+        if (btn.dataset.digit !== undefined) {
+          target.value += btn.dataset.digit;
+        } else if (btn.dataset.numpadAction === 'backspace') {
+          target.value = target.value.slice(0, -1);
+        } else if (btn.dataset.numpadAction === 'clear') {
+          target.value = '';
+        }
+        target.dispatchEvent(new Event('input', { bubbles: true }));
+      });
+    });
+
+    const toggleBtn = document.querySelector(`[data-numpad-toggle="${group}"]`);
+    toggleBtn.addEventListener('click', () => {
+      const state = numpadState[group];
+      state.keyboardMode = !state.keyboardMode;
+      if (state.keyboardMode) {
+        fieldEls.forEach(el => el.removeAttribute('inputmode'));
+        numpadEl.style.display = 'none';
+        toggleBtn.textContent = '🔢 Use numpad instead';
+        (state.activeField || fieldEls[0]).focus();
+      } else {
+        fieldEls.forEach(el => el.setAttribute('inputmode', 'none'));
+        numpadEl.style.display = '';
+        toggleBtn.textContent = '⌨️ Use keyboard instead';
+      }
+    });
+  }
+
+  function resetNumpadState(group) {
+    const cfg = numpadGroups[group];
+    const state = numpadState[group];
+    if (!cfg || !state) return;
+    state.keyboardMode = false;
+    state.activeField = document.getElementById(cfg.fields[0]);
+    cfg.fields.forEach(id => document.getElementById(id).setAttribute('inputmode', 'none'));
+    document.querySelector(`.numpad[data-numpad-for="${group}"]`).style.display = '';
+    document.querySelector(`[data-numpad-toggle="${group}"]`).textContent = '⌨️ Use keyboard instead';
+  }
+
+  initNumpad('setup');
+  initNumpad('unlock');
 
   function showApp() {
     document.getElementById('lockScreen').style.display = 'none';

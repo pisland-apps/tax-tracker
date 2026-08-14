@@ -178,6 +178,29 @@
     .lock-card p { color: var(--text-muted); font-size: 0.85rem; text-align: center; margin-bottom: 1.25rem; }
     .lock-error { background: #fef2f2; border: 1px solid #fecaca; color: #991b1b; padding: 0.6rem 0.75rem; border-radius: var(--radius); font-size: 0.85rem; margin-bottom: 0.75rem; }
 
+    /* Numeric keypad for passcode entry — big touch targets for mobile/tablet.
+       Buttons write directly into the active passcode input's value via JS
+       (no .focus() call on the input), so tapping them never summons the
+       on-screen mobile keyboard. inputmode="none" on the inputs themselves
+       is a second layer of protection in case the field is tapped directly. */
+    .numpad-wrap { margin: 0.25rem 0 1.1rem; }
+    .numpad { display: grid; grid-template-columns: repeat(3, 1fr); gap: 0.6rem; user-select: none; }
+    .numpad-btn {
+      font-size: 1.35rem; font-weight: 600; padding: 0.9rem 0; border-radius: var(--radius);
+      border: 1px solid var(--border); background: #f8fafc; color: var(--text, #1e293b);
+      cursor: pointer; touch-action: manipulation; -webkit-tap-highlight-color: transparent;
+      transition: background 0.1s, transform 0.05s;
+    }
+    .numpad-btn:hover { background: #eef2ff; }
+    .numpad-btn:active { background: #e0e7ff; transform: scale(0.96); }
+    .numpad-btn-action { font-size: 0.95rem; font-weight: 500; color: var(--text-muted); background: transparent; border-color: transparent; }
+    .numpad-btn-action:hover { background: #f1f5f9; }
+    .numpad-toggle-row { text-align: center; margin-top: 0.6rem; }
+    .numpad-toggle-link { background: none; border: none; color: var(--primary); font-size: 0.8rem; cursor: pointer; padding: 0.3rem; text-decoration: underline; }
+    @media (min-width: 480px) {
+      .numpad-btn { padding: 1.05rem 0; font-size: 1.5rem; }
+    }
+
     .toggle-row { display: flex; align-items: center; gap: 0.75rem; margin-bottom: 1rem; }
     .toggle-switch { position: relative; display: inline-block; width: 44px; height: 24px; flex-shrink: 0; }
     .toggle-switch input { opacity: 0; width: 0; height: 0; }
@@ -281,11 +304,30 @@
       <p>Set a passcode to encrypt and protect your tax records on this device. This passcode is never stored — if you forget it, your encrypted records cannot be recovered.</p>
       <div class="form-group">
         <label for="setupPasscode">New Passcode (min. 6 characters)</label>
-        <input type="password" id="setupPasscode" placeholder="Choose a passcode" autocomplete="new-password">
+        <input type="password" id="setupPasscode" placeholder="Choose a passcode" autocomplete="new-password" inputmode="none">
       </div>
       <div class="form-group">
         <label for="setupPasscodeConfirm">Confirm Passcode</label>
-        <input type="password" id="setupPasscodeConfirm" placeholder="Re-enter passcode" autocomplete="new-password">
+        <input type="password" id="setupPasscodeConfirm" placeholder="Re-enter passcode" autocomplete="new-password" inputmode="none">
+      </div>
+      <div class="numpad-wrap" id="setupNumpadWrap">
+        <div class="numpad" data-numpad-for="setup">
+          <button type="button" class="numpad-btn" data-digit="1">1</button>
+          <button type="button" class="numpad-btn" data-digit="2">2</button>
+          <button type="button" class="numpad-btn" data-digit="3">3</button>
+          <button type="button" class="numpad-btn" data-digit="4">4</button>
+          <button type="button" class="numpad-btn" data-digit="5">5</button>
+          <button type="button" class="numpad-btn" data-digit="6">6</button>
+          <button type="button" class="numpad-btn" data-digit="7">7</button>
+          <button type="button" class="numpad-btn" data-digit="8">8</button>
+          <button type="button" class="numpad-btn" data-digit="9">9</button>
+          <button type="button" class="numpad-btn numpad-btn-action" data-numpad-action="clear">Clear</button>
+          <button type="button" class="numpad-btn" data-digit="0">0</button>
+          <button type="button" class="numpad-btn numpad-btn-action" data-numpad-action="backspace">⌫</button>
+        </div>
+        <div class="numpad-toggle-row">
+          <button type="button" class="numpad-toggle-link" data-numpad-toggle="setup">⌨️ Use keyboard instead</button>
+        </div>
       </div>
       <button class="btn" style="width: 100%; justify-content: center;" id="setupPasscodeBtn">Set Passcode &amp; Continue</button>
     </div>
@@ -294,7 +336,26 @@
       <p>Enter your passcode to unlock your records.</p>
       <div class="form-group">
         <label for="unlockPasscode">Passcode</label>
-        <input type="password" id="unlockPasscode" placeholder="Passcode" autocomplete="current-password">
+        <input type="password" id="unlockPasscode" placeholder="Passcode" autocomplete="current-password" inputmode="none">
+      </div>
+      <div class="numpad-wrap" id="unlockNumpadWrap">
+        <div class="numpad" data-numpad-for="unlock">
+          <button type="button" class="numpad-btn" data-digit="1">1</button>
+          <button type="button" class="numpad-btn" data-digit="2">2</button>
+          <button type="button" class="numpad-btn" data-digit="3">3</button>
+          <button type="button" class="numpad-btn" data-digit="4">4</button>
+          <button type="button" class="numpad-btn" data-digit="5">5</button>
+          <button type="button" class="numpad-btn" data-digit="6">6</button>
+          <button type="button" class="numpad-btn" data-digit="7">7</button>
+          <button type="button" class="numpad-btn" data-digit="8">8</button>
+          <button type="button" class="numpad-btn" data-digit="9">9</button>
+          <button type="button" class="numpad-btn numpad-btn-action" data-numpad-action="clear">Clear</button>
+          <button type="button" class="numpad-btn" data-digit="0">0</button>
+          <button type="button" class="numpad-btn numpad-btn-action" data-numpad-action="backspace">⌫</button>
+        </div>
+        <div class="numpad-toggle-row">
+          <button type="button" class="numpad-toggle-link" data-numpad-toggle="unlock">⌨️ Use keyboard instead</button>
+        </div>
       </div>
       <button class="btn" style="width: 100%; justify-content: center;" id="unlockBtn">Unlock</button>
     </div>

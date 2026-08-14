@@ -9,7 +9,7 @@
 // label shown in the bottom-right version badge) on purpose — they live
 // in different files and don't sync automatically, so bump BOTH to the
 // same number by hand on every deploy that touches app.js or index.html.
-const CACHE_VERSION = 13;
+const CACHE_VERSION = 14;
 const CACHE_NAME = `tax-tracker-cache-v${CACHE_VERSION}`;
 
 const APP_SHELL = [
