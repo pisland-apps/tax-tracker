@@ -5,16 +5,33 @@ and Singapore (IRAS, S$). All data lives in the browser's IndexedDB and is
 encrypted at rest with a passcode-derived AES-GCM key (PBKDF2 + Web Crypto).
 Nothing is sent to any server — this is a static, client-only app.
 
+## What it does
+
+- **Overview page:** one card per member per enabled tax type (a member with both LHDN and IRAS gets two cards) with Total Income (blue), Total Tax Paid (red) and Net Income (green). A card opens that member's Ledger. Toolbar: 👥 Members, 🖨️ Print Report, + Add Record, and an owner filter.
+- **Ledger page** (per member, per tax type): summary card(s), a collapsible entry form, the records table, print, and for LHDN the **Company Income Report** (Table or Card view; Card is the default).
+- **LHDN (Malaysia):** working year, submit year, Tahun Taksiran, income sources (company + amount), declared income (the sum of the sources unless typed in), tax paid, and an optional **LHDN Adjustment** whose adjusted income and adjusted tax each override independently.
+- **IRAS (Singapore):** working year, submit year, NOA, assessable income per NOA, tax payment, an optional note (commas make a bullet list), and a computed net income.
+- **Members:** name, which tax types are enabled, optional birth year (shown as "Age" under Working Year), and an optional **Singapore pass** (WP / SP / EP / PR) with From / Till dates. The member card shows "Status & Date Renewal" (amber within 12 months, red when overdue) and a reminder banner appears under the header.
+- **Attachments, backups, lock:** see the sections below.
+- **Back button:** the phone / browser Back button (and Escape on a desktop) closes the open layer (a modal, the attachment viewer, or the Ledger) instead of leaving the app.
+- **Lock screen:** a big on-screen numpad (the phone keyboard stays hidden); "⌨️ Use keyboard instead" switches back to normal typing for passcodes that contain letters.
+
 ## Structure
 
 ```
-index.html          ← the app (installable PWA — reads manifest.json below)
-manifest.json        ← PWA metadata
-sw.js                 ← service worker (offline caching)
-icons/                ← app icons
+index.html            <- the page (markup + CSP <meta>); installable PWA, reads manifest.json
+app.js                <- all application logic; APP_VERSION / APP_VERSION_DATE live here
+manifest.json         <- PWA metadata (start_url "./")
+sw.js                 <- service worker (offline caching); CACHE_VERSION lives here
+_headers              <- real HTTP security headers (Cloudflare Pages only, see below)
+icons/                <- icon-192.png, icon-512.png
+lib/
+  pdf-loader.mjs     <- small module shim: exposes pdf.js as window.pdfjsLib
+  pdf.min.mjs        <- pdf.js (vendored, see the deploy checklist)
+  pdf.worker.min.mjs <- pdf.js worker (vendored)
 ```
 
-`index.html`, `manifest.json`, `sw.js`, and `icons/` sit at the repo root
+`index.html`, `app.js`, `manifest.json`, `sw.js`, `_headers`, `icons/` and `lib/` sit at the repo root
 **on purpose** — GitHub Pages serves `index.html` automatically when it's
 present at the root of the published branch/folder, without any extra
 configuration.
@@ -76,7 +93,7 @@ copies and won't drift-detect each other.
 
 ## Deploy checklist — versioning
 
-Every time `app.js` or `index.html` changes, before shipping:
+Every time `app.js`, `index.html`, `manifest.json` or any cached file changes, before shipping:
 
 1. **Bump `CACHE_VERSION` in `sw.js` by 1.** This is what drives cache
    busting — it's what makes returning visitors' browsers fetch the new
@@ -85,7 +102,7 @@ Every time `app.js` or `index.html` changes, before shipping:
    when offline, so most updates get through either way — but bumping it
    guarantees a clean reset instead of relying on that.
 2. **Set `APP_VERSION` in `app.js` to the same number**, e.g.
-   `CACHE_VERSION = 7` in `sw.js` ↔ `APP_VERSION = 'v7'` in `app.js`. This
+   `CACHE_VERSION = 15` in `sw.js` ↔ `APP_VERSION = 'v15'` in `app.js`. This
    is the label shown in the small version badge in the bottom-right
    corner (visible even on the lock screen, before you unlock). The two
    constants live in different files and don't sync automatically — you
@@ -139,7 +156,14 @@ Every time `app.js` or `index.html` changes, before shipping:
    | `lib/pdf.worker.min.mjs` | `0613f41490dd6aaceed7a93fbbd38c85e6d6aa60474b6588c6e7709cfbe18cb3` |
    | `lib/pdf-loader.mjs` | `c578398411d31ea81a7649351379c68d79a4052de7579240d2e6c62ce220f860` |
 
-   files actually reach returning visitors.
+## Service worker and redirects
+
+The service worker is network-first with a cache fallback. Cloudflare Pages answers `/index.html` with a redirect to `/`, and a browser will not let a service worker answer a page navigation with a *redirected* response, so:
+- `manifest.json` uses `"start_url": "./"` (not `./index.html`);
+- `./index.html` is not in the precache list; the one canonical page entry is `./`;
+- every page navigation is answered from that `./` entry whatever URL was asked for (`/`, `/index.html`, a bookmark with a query string), and a redirected response is never written to the cache.
+
+Installed copies made before v15 still start at `./index.html`; that keeps working. This was tested in headless Chromium against a local server that imitates the redirect, online and with the server stopped, and for the upgrade from v14. It has **not** been confirmed on the real Cloudflare Pages host.
 
 ## Attachments
 
@@ -176,6 +200,22 @@ a database that already has others.
   activity. Defaults to 15 minutes on first setup. The choice is saved
   per-device in the local vault metadata (unencrypted — it's just a UI
   preference), and is preserved across a passcode change.
+
+## Update log
+
+- **v15** — Service worker and `start_url` hardened for Cloudflare Pages (see "Service worker and redirects"); README brought in line with the code (features, structure, stray line removed, this log).
+- **v14** — Big numpad on the set-passcode and unlock screens, with a switch back to the normal keyboard.
+- **v13** — pdf.js 4.10.38 -> 6.2.108 (routine, not CVE-driven).
+- **v12** — pdf.js 3.11.174 -> 4.10.38 (CVE-2024-4367) with `lib/pdf-loader.mjs`; idle auto-lock; `autocomplete` on all password fields.
+- **v11** — `_headers` (real CSP with `frame-ancestors`, other security headers); README checksum table for the vendored pdf.js files.
+- **v10** — Back button / gesture closes the open layer (history stack); Escape does the same.
+- **v9** — pdf.js self-hosted under `lib/`; CSP `script-src` / `worker-src` `'self'` only.
+- **v8** — Fixed PDF attachments not opening (a placeholder `integrity` hash blocked pdf.js).
+- **v7** — Singapore pass status with From / Till dates, "Status & Date Renewal" on the member card, 12-month reminder banner.
+- **v6** — Icons, manifest and README merged; `CACHE_VERSION` and `APP_VERSION` kept equal; `standalone/` references removed.
+- **v5** — Attachments (image / PDF) with an in-app viewer, export scope (all members or one), version badge, IRAS note field; birth year no longer lost on re-import.
+- **v2 - v4** — Inline handlers removed, strict CSP; the first hash-based CSP was wrong and was corrected.
+- **v1** — PWA packaging (manifest, service worker, icons).
 
 ## License
 

@@ -2,7 +2,7 @@
   "name": "Tax Record & Income Tracker",
   "short_name": "TaxTracker",
   "description": "Malaysia (LHDN) & Singapore (IRAS) tax record tracker — local, encrypted, offline-capable.",
-  "start_url": "./index.html",
+  "start_url": "./",
   "scope": "./",
   "display": "standalone",
   "orientation": "portrait-primary",

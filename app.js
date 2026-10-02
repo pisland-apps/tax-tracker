@@ -13,8 +13,8 @@
   // Service Worker/cache in devtools — it means the browser is still
   // running an old cached build, not that the deploy failed.
   // ============================================================
-  const APP_VERSION = 'v14';
-  const APP_VERSION_DATE = '2026-08-14';
+  const APP_VERSION = 'v15';
+  const APP_VERSION_DATE = '2026-10-02';
 
   (function initVersionBadge() {
     const el = document.getElementById('versionBadge');

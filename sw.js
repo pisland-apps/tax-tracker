@@ -9,12 +9,13 @@
 // label shown in the bottom-right version badge) on purpose — they live
 // in different files and don't sync automatically, so bump BOTH to the
 // same number by hand on every deploy that touches app.js or index.html.
-const CACHE_VERSION = 14;
+const CACHE_VERSION = 15;
 const CACHE_NAME = `tax-tracker-cache-v${CACHE_VERSION}`;
 
+// './index.html' is deliberately NOT listed: Cloudflare Pages redirects /index.html to /, and
+// cache.addAll() would store that as a *redirected* response. The one canonical page entry is './'.
 const APP_SHELL = [
   './',
-  './index.html',
   './app.js',
   './manifest.json',
   './icons/icon-192.png',
@@ -41,17 +42,39 @@ self.addEventListener('activate', (event) => {
   );
 });
 
-// Network-first with cache fallback for navigation/app-shell requests, so
-// visitors always get the latest version when online, and the last cached
-// version when offline. All app data lives in IndexedDB in the page itself
-// (not here), so this worker only needs to cache the app shell files.
+// Network-first with cache fallback, so visitors always get the latest version when online and the
+// last cached version when offline. All app data lives in IndexedDB in the page itself (not here),
+// so this worker only needs to cache the app shell files.
+//
+// Two rules about redirects (Cloudflare Pages answers /index.html with a redirect to /):
+//  1. A page navigation is always answered from the ONE canonical entry './', whatever URL was
+//     asked for (/, /index.html, a bookmark with a query string...). The entry is refreshed from
+//     the network whenever a navigation succeeds.
+//  2. A redirected response is never written to the cache. Browsers refuse to let a service worker
+//     answer a navigation with a redirected response, so one stored copy could break the app
+//     (ERR_FAILED) when launched from an installed shortcut.
 self.addEventListener('fetch', (event) => {
   if (event.request.method !== 'GET') return;
+
+  if (event.request.mode === 'navigate') {
+    event.respondWith(
+      fetch(event.request)
+        .then((response) => {
+          if (response && response.status === 200 && !response.redirected) {
+            const clone = response.clone();
+            caches.open(CACHE_NAME).then((cache) => cache.put('./', clone));
+          }
+          return response;
+        })
+        .catch(() => caches.match('./'))
+    );
+    return;
+  }
 
   event.respondWith(
     fetch(event.request)
       .then((response) => {
-        if (response && response.status === 200) {
+        if (response && response.status === 200 && !response.redirected) {
           const clone = response.clone();
           caches.open(CACHE_NAME).then((cache) => cache.put(event.request, clone));
         }
