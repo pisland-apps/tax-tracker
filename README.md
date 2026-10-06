@@ -13,6 +13,7 @@ Nothing is sent to any server — this is a static, client-only app.
 - **IRAS (Singapore):** working year, submit year, NOA, assessable income per NOA, tax payment, an optional note (commas make a bullet list), and a computed net income.
 - **Members:** name, which tax types are enabled, optional birth year (shown as "Age" under Working Year), and an optional **Singapore pass** (WP / SP / EP / PR) with From / Till dates. The member card shows "Status & Date Renewal" (amber within 12 months, red when overdue) and a reminder banner appears under the header.
 - **Attachments, backups, lock:** see the sections below.
+- **Safer by design (v16):** Change Passcode and Import are all-or-nothing (a failure or a closed tab leaves your data exactly as it was); a backup file is checked completely before anything is replaced and the confirmation shows what it contains; a damaged item is skipped with a warning banner instead of freezing the app; if the passcode is changed in another window, this window locks itself; locking closes every open viewer and empties the screen.
 - **Back button:** the phone / browser Back button (and Escape on a desktop) closes the open layer (a modal, the attachment viewer, or the Ledger) instead of leaving the app.
 - **Lock screen:** a big on-screen numpad (the phone keyboard stays hidden); "⌨️ Use keyboard instead" switches back to normal typing for passcodes that contain letters.
 
@@ -102,7 +103,7 @@ Every time `app.js`, `index.html`, `manifest.json` or any cached file changes, b
    when offline, so most updates get through either way — but bumping it
    guarantees a clean reset instead of relying on that.
 2. **Set `APP_VERSION` in `app.js` to the same number**, e.g.
-   `CACHE_VERSION = 15` in `sw.js` ↔ `APP_VERSION = 'v15'` in `app.js`. This
+   `CACHE_VERSION = 16` in `sw.js` ↔ `APP_VERSION = 'v16'` in `app.js`. This
    is the label shown in the small version badge in the bottom-right
    corner (visible even on the lock screen, before you unlock). The two
    constants live in different files and don't sync automatically — you
@@ -127,9 +128,13 @@ Every time `app.js`, `index.html`, `manifest.json` or any cached file changes, b
    ```
    npm pack pdfjs-dist@<version>
    tar xzf pdfjs-dist-<version>.tgz
-   cp package/build/pdf.min.mjs package/build/pdf.worker.min.mjs ./lib/
+   cp package/legacy/build/pdf.min.mjs package/legacy/build/pdf.worker.min.mjs ./lib/
    ```
-   Pull from the official npm package (not a random CDN/GitHub mirror),
+   Use the **`legacy/build`** files, not `build/`: the modern build needs a very
+   new browser feature (`Map.prototype.getOrInsertComputed`, Chrome 145 and
+   later) and shows "Could not preview this file" in older browsers, including
+   many phones; the legacy build carries its own fallbacks and also works in
+   current browsers. Pull from the official npm package (not a random CDN/GitHub mirror),
    keep `pdf.min.mjs` and `pdf.worker.min.mjs` on the *same* version, add
    any new/renamed files to `APP_SHELL` in `sw.js`, and bump
    `CACHE_VERSION`/`APP_VERSION` per steps 1–2 above so the new files get
@@ -146,14 +151,15 @@ Every time `app.js`, `index.html`, `manifest.json` or any cached file changes, b
    to SRI, and pinning it there would just add a way for the app to
    break silently on a stale/mismatched hash with no upside, since same
    origin has nothing external to protect against). Current pdfjs-dist
-   version: **6.2.108** (updated from 4.10.38 — routine version bump,
-   no CVE prompting it; `getDocument`/`GlobalWorkerOptions` usage in
-   `app.js` is unchanged and compatible with this release).
+   version: **6.4.299, legacy build** (v16; up from 6.2.108, which was already
+   the fixed version for CVE-2026-16633). `getDocument` is called with
+   `isEvalSupported: false` and the viewer destroys the loading task when a
+   PDF is closed. Retest PDF viewing after every pdf.js update.
 
    | File | SHA-256 |
    |---|---|
-   | `lib/pdf.min.mjs` | `e0be3863c23c8af2305b16548febd58e7f8874a460253317d7771cddbc1c0f6d` |
-   | `lib/pdf.worker.min.mjs` | `0613f41490dd6aaceed7a93fbbd38c85e6d6aa60474b6588c6e7709cfbe18cb3` |
+   | `lib/pdf.min.mjs` | `bccc24ea711db8e44503629519904a5292d73b9daaa214bbe7cdcc282b0f4259` |
+   | `lib/pdf.worker.min.mjs` | `145d2dd3ab0c86151011dba95acfa2d5336e2accd59388ea43dbee0efddaaec6` |
    | `lib/pdf-loader.mjs` | `c578398411d31ea81a7649351379c68d79a4052de7579240d2e6c62ce220f860` |
 
 ## Service worker and redirects
@@ -203,6 +209,7 @@ a database that already has others.
 
 ## Update log
 
+- **v16** — Data-safety release after a full review (`tax-tracker-security-review` in the project notes). **Change Passcode** and **Import** are now all-or-nothing (everything is encrypted in memory first, then written in one database transaction). Import validates the whole file first (types, ranges, ids, attachments, sizes), shows what it contains, and a bad file changes nothing. A passcode change in one window locks other open windows (and a stale window can never write). Unreadable items are skipped with a warning instead of freezing the app. Database errors (for example a full device) are reported and the form keeps what you typed. Locking now closes the attachment viewer, empties the screen and clears passcode fields; the app also locks when it comes back after being hidden longer than the idle limit. Imported and stored values can no longer inject markup. Attachments are checked on upload, import and open (only PDF or image types keep their type; other files download as plain files). Backup export uses a Blob download. `iterations` read from a file or the vault is range-checked. **pdf.js 6.4.299 (legacy build)** with `isEvalSupported: false`; PDFs now open in browsers older than Chrome 145 too. COOP / CORP headers added in `_headers`. Persistent storage is requested. **The passcode minimum is unchanged: 6 characters (the numpad is kept).**
 - **v15** — Service worker and `start_url` hardened for Cloudflare Pages (see "Service worker and redirects"); README brought in line with the code (features, structure, stray line removed, this log).
 - **v14** — Big numpad on the set-passcode and unlock screens, with a switch back to the normal keyboard.
 - **v13** — pdf.js 4.10.38 -> 6.2.108 (routine, not CVE-driven).

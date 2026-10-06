@@ -280,6 +280,7 @@
     .member-card-permit { font-size: 0.8rem; margin: -0.3rem 0 0.6rem; }
     .permit-reminder-banner { background: #fffbeb; border: 1px solid #fde68a; color: #92400e; padding: 0.85rem 1.1rem; border-radius: var(--radius); margin-bottom: 1rem; font-size: 0.9rem; }
     .permit-reminder-banner ul { margin: 0.4rem 0 0 1.2rem; padding: 0; }
+    .data-warning-banner { background: #fef2f2; border: 1px solid #fecaca; color: #991b1b; padding: 0.85rem 1.1rem; border-radius: var(--radius); margin-bottom: 1rem; font-weight: 500; }
     .permit-reminder-banner li { margin-bottom: 0.15rem; }
 
     /* Attachment Viewer Modal */
@@ -394,6 +395,7 @@
   </div>
 
   <div id="permitReminderBanner" class="permit-reminder-banner no-print" style="display: none;"></div>
+  <div id="dataWarningBanner" class="data-warning-banner no-print" role="alert" style="display: none;"></div>
 
   <!-- ============================= OVERVIEW VIEW ============================= -->
   <div id="overviewView">
@@ -757,6 +759,7 @@
       <label for="newPasscodeConfirmInput">Confirm New Passcode</label>
       <input type="password" id="newPasscodeConfirmInput" placeholder="Re-enter new passcode" autocomplete="new-password">
     </div>
+    <p style="font-size: 0.8rem; color: var(--text-muted); margin: 0 0 0.75rem;">Tip: export an encrypted backup first. The change is all-or-nothing, and any other window of this app will lock itself.</p>
     <div id="changePasscodeError" class="lock-error" style="display: none;"></div>
     <div class="modal-actions">
       <button class="btn btn-secondary" id="closeChangePasscodeModalBtn">Cancel</button>
@@ -844,16 +847,17 @@
   pdf.js is loaded here (rather than left to app.js) so pdfjsLib exists
   before app.js needs it.
 
-  Vendored locally at ./lib/pdf.min.mjs (pdfjs-dist 6.2.108, pulled from
+  Vendored locally at ./lib/pdf.min.mjs (pdfjs-dist 6.4.299 LEGACY build, pulled from
   the official npm registry — Mozilla's own publish of pdf.js — rather
   than a CDN edge copy). Same-origin 'self' scripts aren't subject to
   SRI in the first place, so there's no integrity= hash to keep in sync
   here. Trust is anchored once, at vendoring time (see README for how to
   update this file, and for a documentation-only SHA-256 of both
   ./lib/*.mjs files to check against if you ever want to confirm they
-  weren't altered post-vendoring). Upgraded from 4.10.38 → 6.2.108, a
-  routine version bump (not CVE-driven); this app's CSP (script-src
-  'self', no 'unsafe-eval') stays the only line of defense either way.
+  weren't altered post-vendoring). v16: 6.2.108 → 6.4.299, legacy build
+  (the modern build needs Chrome 145+ features and fails to open PDFs in
+  older browsers). This app's CSP (script-src 'self', no 'unsafe-eval')
+  stays the main line of defense either way.
 
   pdfjs-dist stopped shipping a classic/UMD build from v4 onward — it's
   ESM-only now. ./lib/pdf-loader.mjs is a small module-type shim (the

@@ -13,8 +13,8 @@
   // Service Worker/cache in devtools — it means the browser is still
   // running an old cached build, not that the deploy failed.
   // ============================================================
-  const APP_VERSION = 'v15';
-  const APP_VERSION_DATE = '2026-10-02';
+  const APP_VERSION = 'v16';
+  const APP_VERSION_DATE = '2026-10-04';
 
   (function initVersionBadge() {
     const el = document.getElementById('versionBadge');
@@ -68,8 +68,10 @@
   const DEFAULT_IDLE_LOCK_MINUTES = 15;
   let idleLockMinutes = DEFAULT_IDLE_LOCK_MINUTES;
   let idleTimer = null;
+  let lastActivityAt = Date.now();
 
   function resetIdleTimer() {
+    lastActivityAt = Date.now();
     if (idleTimer) { clearTimeout(idleTimer); idleTimer = null; }
     if (!vaultKey || !idleLockMinutes) return; // locked, or auto-lock set to "Never"
     idleTimer = setTimeout(() => {
@@ -86,6 +88,16 @@
   // before setup/unlock, and cheap since it only ever clears+sets a timeout.
   ['mousedown', 'mousemove', 'keydown', 'touchstart', 'scroll', 'wheel'].forEach(evt => {
     window.addEventListener(evt, resetIdleTimer, { passive: true });
+  });
+
+  // Browsers pause timers for a page that is in the background (phones do it
+  // aggressively), so a plain timeout may not have fired while the app was
+  // hidden. When the page becomes visible again, check the clock instead.
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible' && vaultKey && idleLockMinutes &&
+        Date.now() - lastActivityAt >= idleLockMinutes * 60 * 1000) {
+      lockApp();
+    }
   });
 
   function showFatalError(msg) {
@@ -184,38 +196,127 @@
     return JSON.parse(new TextDecoder().decode(ptBuf));
   }
 
-  function getVaultMeta() {
-    return new Promise((resolve) => {
-      const tx = db.transaction(STORE_VAULT, 'readonly');
-      const store = tx.objectStore(STORE_VAULT);
-      const request = store.get('vault');
-      request.onsuccess = () => resolve(request.result || null);
+  // ------------------------------------------------------------
+  // IndexedDB promise helpers (v16).
+  // Every request / transaction now SETTLES: it resolves on success and
+  // REJECTS on error or abort. Before v16 the helpers only listened for
+  // success, so a failed write (full disk, aborted transaction ...) left
+  // the caller waiting forever and the form looked frozen. Writes now
+  // resolve on the transaction's `complete` event (data really committed).
+  // ------------------------------------------------------------
+  function wrapDbError(err, fallbackMsg) {
+    const e = new Error((err && err.message) ? err.message : fallbackMsg);
+    e.name = (err && err.name) ? err.name : 'DatabaseError';
+    e.isDb = true;
+    return e;
+  }
+
+  function reqToPromise(req) {
+    return new Promise((resolve, reject) => {
+      req.onsuccess = () => resolve(req.result);
+      req.onerror = () => reject(wrapDbError(req.error, 'Database request failed'));
     });
   }
 
-  function saveVaultMeta(meta) {
-    return new Promise((resolve) => {
-      const tx = db.transaction(STORE_VAULT, 'readwrite');
-      const store = tx.objectStore(STORE_VAULT);
-      const request = store.put({ id: 'vault', ...meta });
-      request.onsuccess = () => resolve();
+  function txDone(tx) {
+    return new Promise((resolve, reject) => {
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(wrapDbError(tx.error, 'Database transaction failed'));
+      tx.onabort = () => reject(wrapDbError(tx.error, 'Database transaction was cancelled'));
     });
   }
 
-  // Persists just the idle-auto-lock preference without touching the
-  // salt/verify/iterations fields — reads the current meta record first
-  // and writes it back with only idleLockMinutes changed, since
-  // saveVaultMeta() replaces the whole record rather than patching it.
-  async function saveIdleLockMinutes(minutes) {
+  function describeDbError(err) {
+    if (err && err.isStale) return err.message;
+    if (err && err.name === 'QuotaExceededError') {
+      return 'Not enough storage space on this device, so your change was NOT saved.\n\nFree some space (for example export a backup, then delete large attachments or old records) and try again.';
+    }
+    return 'Could not save to the local database, so your change was NOT saved.\n\n(' + ((err && err.message) ? err.message : 'unknown error') + ')';
+  }
+
+  // Safety net for anything that still rejects: tell the person instead of
+  // failing silently. Only database errors and "locked" cases are special.
+  function reportProblem(err) {
+    if (!err || err.__reported) return;
+    if (err.message === 'Locked') return;           // a timer fired after locking: nothing to say
+    if (err.isStale) { err.__reported = true; return; } // the lock screen already explains it
+    if (err.isDb) { err.__reported = true; alert(describeDbError(err)); }
+  }
+  window.addEventListener('unhandledrejection', (e) => { reportProblem(e.reason); });
+
+  function randomHex(bytes) {
+    return Array.from(crypto.getRandomValues(new Uint8Array(bytes))).map(b => b.toString(16).padStart(2, '0')).join('');
+  }
+
+  // Each window keeps its own copy of the key. `epoch` (stored in the vault
+  // record, replaced whenever the passcode changes) lets a window notice that
+  // its key is out of date BEFORE it writes anything encrypted with it.
+  let sessionEpoch = null;
+  const syncChannel = (typeof BroadcastChannel !== 'undefined') ? new BroadcastChannel('tax-tracker-session') : null;
+  if (syncChannel) {
+    syncChannel.onmessage = (e) => {
+      if (e.data && e.data.type === 'passcode-changed' && vaultKey) {
+        lockApp('The passcode was changed in another window of this app. Unlock again with the new passcode.');
+      }
+    };
+  }
+
+  async function ensureSessionCurrent() {
+    if (!vaultKey) throw new Error('Locked');
     const meta = await getVaultMeta();
-    if (!meta) return; // shouldn't happen post-unlock, but don't crash if it does
-    await saveVaultMeta({ ...meta, idleLockMinutes: minutes });
+    if (!meta || (meta.epoch || '') !== (sessionEpoch || '')) {
+      const err = new Error('The passcode was changed in another window of this app. Unlock again with the new passcode.');
+      err.isStale = true;
+      lockApp(err.message);
+      throw err;
+    }
+  }
+
+  async function getVaultMeta() {
+    const tx = db.transaction(STORE_VAULT, 'readonly');
+    const result = await reqToPromise(tx.objectStore(STORE_VAULT).get('vault'));
+    return result || null;
+  }
+
+  async function saveVaultMeta(meta) {
+    const tx = db.transaction(STORE_VAULT, 'readwrite');
+    const done = txDone(tx);
+    tx.objectStore(STORE_VAULT).put({ id: 'vault', ...meta });
+    await done;
+  }
+
+  // Read-modify-write of the vault record inside ONE transaction, so a
+  // preference change can never overwrite a salt / check value / epoch that
+  // another window changed in between.
+  async function patchVaultMeta(patch) {
+    const tx = db.transaction(STORE_VAULT, 'readwrite');
+    const done = txDone(tx);
+    const store = tx.objectStore(STORE_VAULT);
+    const cur = await reqToPromise(store.get('vault'));
+    if (!cur) { tx.abort(); try { await done; } catch (e) { /* nothing to patch */ } return; }
+    store.put({ ...cur, ...patch });
+    await done;
+  }
+
+  async function saveIdleLockMinutes(minutes) {
+    await patchVaultMeta({ idleLockMinutes: minutes });
+  }
+
+  // The stored iteration count is read from the database (and from backup
+  // files): refuse absurd values instead of freezing the tab on them.
+  const MIN_PBKDF2_ITERATIONS = 100000;
+  const MAX_PBKDF2_ITERATIONS = 5000000;
+  function safeIterations(n) {
+    if (n === undefined || n === null) return PBKDF2_ITERATIONS;   // old records without the field
+    return (Number.isInteger(n) && n >= MIN_PBKDF2_ITERATIONS && n <= MAX_PBKDF2_ITERATIONS) ? n : null;
   }
 
   // Returns the derived CryptoKey if the passcode is correct, or null if not.
   async function verifyPasscode(passcode, meta) {
     try {
-      const key = await deriveKeyFromPasscode(passcode, meta.salt, meta.iterations || PBKDF2_ITERATIONS);
+      const iterations = safeIterations(meta.iterations);
+      if (iterations === null) return null;
+      const key = await deriveKeyFromPasscode(passcode, meta.salt, iterations);
       const result = await decryptObject(meta.verify, key);
       return result === VAULT_CHECK_STRING ? key : null;
     } catch (e) {
@@ -226,21 +327,14 @@
   // Raw (unencrypted-aware) helpers used only for the one-time legacy-data
   // migration below, where rows may or may not already be in {encData} form.
   function getAllRaw(storeName) {
-    return new Promise((resolve) => {
-      const tx = db.transaction(storeName, 'readonly');
-      const store = tx.objectStore(storeName);
-      const request = store.getAll();
-      request.onsuccess = () => resolve(request.result || []);
-    });
+    return reqToPromise(db.transaction(storeName, 'readonly').objectStore(storeName).getAll()).then(r => r || []);
   }
 
-  function putRaw(storeName, obj) {
-    return new Promise((resolve) => {
-      const tx = db.transaction(storeName, 'readwrite');
-      const store = tx.objectStore(storeName);
-      const request = store.put(obj);
-      request.onsuccess = () => resolve();
-    });
+  async function putRaw(storeName, obj) {
+    const tx = db.transaction(storeName, 'readwrite');
+    const done = txDone(tx);
+    tx.objectStore(storeName).put(obj);
+    await done;
   }
 
   // One-time migration: encrypts any pre-existing plaintext rows (created
@@ -275,56 +369,167 @@
     }
   }
 
+  // ------------------------------------------------------------
+  // Reading rows safely (v16).
+  // A row that cannot be decrypted (damaged, or written under a different
+  // key) is SKIPPED and counted instead of freezing every screen on
+  // "Loading…". The count is shown in a banner so it is never silent.
+  // Rows are also normalised to the shape the screens expect, so a record
+  // from an old or hand-edited backup can no longer crash a ledger.
+  // ------------------------------------------------------------
+  const unreadableKeys = new Set();
+
+  function updateDataWarning() {
+    const el = document.getElementById('dataWarningBanner');
+    if (!el) return;
+    if (unreadableKeys.size === 0) { el.style.display = 'none'; el.textContent = ''; return; }
+    el.textContent = '⚠️ ' + unreadableKeys.size + ' saved item' + (unreadableKeys.size === 1 ? '' : 's') +
+      ' could not be read with this passcode (damaged, or saved under a different passcode) and ' +
+      (unreadableKeys.size === 1 ? 'is' : 'are') + ' not shown. Everything else is shown normally. ' +
+      'Do not change the passcode or import over this data until you have an export of what you can see, and keep any older backup.';
+    el.style.display = 'block';
+  }
+
+  async function decryptRowsTolerant(storeName, rows, build) {
+    const settled = await Promise.all(rows.map(async (row) => {
+      try {
+        let payload;
+        if (row.encData) {
+          payload = await decryptObject(row.encData);
+        } else {                                    // an old plaintext row from before encryption existed
+          const { id, memberId, ...rest } = row;
+          payload = rest;
+        }
+        return build(row, payload);
+      } catch (e) {
+        unreadableKeys.add(storeName + ':' + row.id);
+        return null;
+      }
+    }));
+    updateDataWarning();
+    return settled.filter(Boolean);
+  }
+
+  const PERMIT_CODES = ['WP', 'SP', 'EP', 'PR'];
+  function numOrNull(v) {
+    if (v === null || v === undefined || v === '') return null;
+    const n = Number(v);
+    return Number.isFinite(n) ? n : null;
+  }
+  function intOrNull(v) {
+    const n = numOrNull(v);
+    return n === null ? null : Math.trunc(n);
+  }
+  function dateOrNull(v) {
+    return (typeof v === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(v)) ? v : null;
+  }
+  function textOrNull(v) {
+    if (v === null || v === undefined) return null;
+    return typeof v === 'string' ? v : String(v);
+  }
+  // Attachments are only checked lightly when rows are read (they can be
+  // megabytes); the strict check runs on upload, on import and when opened.
+  function lightAttachments(list) {
+    if (!Array.isArray(list)) return [];
+    return list.filter(x => x && typeof x === 'object' && typeof x.data === 'string').map(x => ({
+      name: (typeof x.name === 'string' && x.name) ? x.name : 'attachment',
+      type: typeof x.type === 'string' ? x.type : '',
+      data: x.data
+    }));
+  }
+
+  function normalizeMember(m) {
+    const t = (m.taxTypes && typeof m.taxTypes === 'object') ? m.taxTypes : null;
+    const birth = intOrNull(m.birthYear);
+    return {
+      id: Number(m.id),
+      name: (typeof m.name === 'string' && m.name.trim()) ? m.name : 'Unnamed',
+      taxTypes: t ? { lhdn: !!t.lhdn, iras: !!t.iras } : { lhdn: true, iras: true },
+      birthYear: (birth !== null && birth >= 1800 && birth <= 2200) ? birth : null,
+      permitStatus: PERMIT_CODES.includes(m.permitStatus) ? m.permitStatus : null,
+      permitFrom: dateOrNull(m.permitFrom),
+      permitTill: dateOrNull(m.permitTill)
+    };
+  }
+
+  function normalizeLhdnRecord(row, p) {
+    const sources = Array.isArray(p.sources)
+      ? p.sources.filter(s => s && typeof s === 'object').map(s => ({ name: textOrNull(s.name) || '', amount: numOrNull(s.amount) || 0 }))
+      : [];
+    const derived = sources.reduce((sum, s) => sum + s.amount, 0);
+    const totalDerivedIncome = numOrNull(p.totalDerivedIncome);
+    const incomeDeclared = numOrNull(p.incomeDeclared);
+    const taxAmount = numOrNull(p.taxAmount);
+    return {
+      id: row.id,
+      memberId: row.memberId,
+      yearWorking: intOrNull(p.yearWorking) || 0,
+      yearSubmit: intOrNull(p.yearSubmit),
+      tahunTaksiran: intOrNull(p.tahunTaksiran),
+      sources,
+      totalDerivedIncome: totalDerivedIncome === null ? derived : totalDerivedIncome,
+      incomeDeclared: incomeDeclared === null ? derived : incomeDeclared,
+      incomeDeclaredManual: !!p.incomeDeclaredManual,
+      incomeVsSourceDiff: numOrNull(p.incomeVsSourceDiff) || 0,
+      taxAmount,
+      incomeAfterTax: numOrNull(p.incomeAfterTax) === null ? ((incomeDeclared === null ? derived : incomeDeclared) - (taxAmount || 0)) : numOrNull(p.incomeAfterTax),
+      lhdnYear: intOrNull(p.lhdnYear),
+      lhdnAdjustedIncome: numOrNull(p.lhdnAdjustedIncome),
+      lhdnAdjustedTax: numOrNull(p.lhdnAdjustedTax),
+      attachments: lightAttachments(p.attachments)
+    };
+  }
+
+  function normalizeIrasRecord(row, p) {
+    return {
+      id: row.id,
+      memberId: row.memberId,
+      yearWorking: intOrNull(p.yearWorking) || 0,
+      yearSubmit: intOrNull(p.yearSubmit),
+      noa: textOrNull(p.noa),
+      noaIncome: numOrNull(p.noaIncome),
+      taxPayment: numOrNull(p.taxPayment),
+      note: textOrNull(p.note),
+      attachments: lightAttachments(p.attachments)
+    };
+  }
+
   // ============================================================
   // Member DB Methods (encrypted at rest — name & taxTypes are inside encData;
   // only the numeric `id` primary key stays in the clear)
   // ============================================================
-  function getMembers() {
-    return new Promise((resolve) => {
-      const tx = db.transaction(STORE_MEMBERS, 'readonly');
-      const store = tx.objectStore(STORE_MEMBERS);
-      const request = store.getAll();
-      request.onsuccess = async () => {
-        const raw = request.result || [];
-        const decrypted = await Promise.all(raw.map(async row => {
-          if (row.encData) {
-            const payload = await decryptObject(row.encData);
-            return { id: row.id, ...payload };
-          }
-          return row;
-        }));
-        resolve(decrypted);
-      };
-    });
+  async function getMembers() {
+    const raw = await reqToPromise(db.transaction(STORE_MEMBERS, 'readonly').objectStore(STORE_MEMBERS).getAll());
+    return decryptRowsTolerant(STORE_MEMBERS, raw || [], (row, payload) => normalizeMember({ id: row.id, ...payload }));
   }
 
   async function saveMember(name, taxTypes, birthYear) {
+    await ensureSessionCurrent();
     const encData = await encryptObject({ name, taxTypes: taxTypes || { lhdn: true, iras: true }, birthYear: birthYear || null });
-    return new Promise((resolve) => {
-      const tx = db.transaction(STORE_MEMBERS, 'readwrite');
-      const store = tx.objectStore(STORE_MEMBERS);
-      const request = store.add({ encData });
-      request.onsuccess = () => resolve(request.result);
-    });
+    const tx = db.transaction(STORE_MEMBERS, 'readwrite');
+    const done = txDone(tx);
+    const id = await reqToPromise(tx.objectStore(STORE_MEMBERS).add({ encData }));
+    await done;
+    return id;
   }
 
   async function updateMemberInDB(member) {
+    await ensureSessionCurrent();
     const { id, ...payload } = member;
     const encData = await encryptObject(payload);
-    return new Promise((resolve) => {
-      const tx = db.transaction(STORE_MEMBERS, 'readwrite');
-      const store = tx.objectStore(STORE_MEMBERS);
-      const request = store.put({ id, encData });
-      request.onsuccess = () => resolve(request.result);
-    });
+    const tx = db.transaction(STORE_MEMBERS, 'readwrite');
+    const done = txDone(tx);
+    const key = await reqToPromise(tx.objectStore(STORE_MEMBERS).put({ id, encData }));
+    await done;
+    return key;
   }
 
-  function deleteMemberFromDB(id) {
-    return new Promise((resolve) => {
-      const tx = db.transaction(STORE_MEMBERS, 'readwrite');
-      tx.objectStore(STORE_MEMBERS).delete(id);
-      tx.oncomplete = () => resolve();
-    });
+  async function deleteMemberFromDB(id) {
+    await ensureSessionCurrent();
+    const tx = db.transaction(STORE_MEMBERS, 'readwrite');
+    const done = txDone(tx);
+    tx.objectStore(STORE_MEMBERS).delete(id);
+    await done;
   }
 
   // Members created before the LHDN/IRAS toggle existed default to both enabled.
@@ -353,7 +558,7 @@
   function formatPermitDate(dateStr) {
     if (!dateStr) return '';
     const d = new Date(dateStr + 'T00:00:00');
-    if (isNaN(d.getTime())) return dateStr;
+    if (isNaN(d.getTime())) return escapeHtml(dateStr);   // shown inside HTML: never raw
     return d.toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' });
   }
 
@@ -361,135 +566,126 @@
   // LHDN Record DB Methods (encrypted at rest — id & memberId stay in the
   // clear so the memberId index keeps working; everything else is encrypted)
   // ============================================================
-  function getRecordsByMember(memberId) {
-    return new Promise((resolve) => {
-      const tx = db.transaction(STORE_RECORDS, 'readonly');
-      const store = tx.objectStore(STORE_RECORDS);
-      const index = store.index('memberId');
-      const request = index.getAll(memberId);
-      request.onsuccess = async () => {
-        const raw = request.result || [];
-        const decrypted = await Promise.all(raw.map(async row => {
-          const payload = await decryptObject(row.encData);
-          return { id: row.id, memberId: row.memberId, ...payload };
-        }));
-        resolve(decrypted);
-      };
-    });
+  async function getRecordsByMember(memberId) {
+    const raw = await reqToPromise(db.transaction(STORE_RECORDS, 'readonly').objectStore(STORE_RECORDS).index('memberId').getAll(memberId));
+    return decryptRowsTolerant(STORE_RECORDS, raw || [], normalizeLhdnRecord);
   }
 
-  function getAllRecords() {
-    return new Promise((resolve) => {
-      const tx = db.transaction(STORE_RECORDS, 'readonly');
-      const store = tx.objectStore(STORE_RECORDS);
-      const request = store.getAll();
-      request.onsuccess = async () => {
-        const raw = request.result || [];
-        const decrypted = await Promise.all(raw.map(async row => {
-          const payload = await decryptObject(row.encData);
-          return { id: row.id, memberId: row.memberId, ...payload };
-        }));
-        resolve(decrypted);
-      };
-    });
+  async function getAllRecords() {
+    const raw = await reqToPromise(db.transaction(STORE_RECORDS, 'readonly').objectStore(STORE_RECORDS).getAll());
+    return decryptRowsTolerant(STORE_RECORDS, raw || [], normalizeLhdnRecord);
   }
 
   async function saveRecordToDB(record) {
+    await ensureSessionCurrent();
     const { id, memberId, ...payload } = record;
     const encData = await encryptObject(payload);
     const toStore = { memberId, encData };
     if (id !== undefined && id !== null) toStore.id = id;
-    return new Promise((resolve) => {
-      const tx = db.transaction(STORE_RECORDS, 'readwrite');
-      const store = tx.objectStore(STORE_RECORDS);
-      const request = store.put(toStore);
-      request.onsuccess = () => resolve(request.result);
-    });
+    const tx = db.transaction(STORE_RECORDS, 'readwrite');
+    const done = txDone(tx);
+    const key = await reqToPromise(tx.objectStore(STORE_RECORDS).put(toStore));
+    await done;
+    return key;
   }
 
-  function deleteRecordFromDB(id) {
-    return new Promise((resolve) => {
-      const tx = db.transaction(STORE_RECORDS, 'readwrite');
-      const store = tx.objectStore(STORE_RECORDS);
-      const request = store.delete(id);
-      request.onsuccess = () => resolve();
-    });
+  async function deleteRecordFromDB(id) {
+    await ensureSessionCurrent();
+    const tx = db.transaction(STORE_RECORDS, 'readwrite');
+    const done = txDone(tx);
+    tx.objectStore(STORE_RECORDS).delete(id);
+    await done;
   }
 
   // ============================================================
   // IRAS (Singapore) Record DB Methods (same encrypted-at-rest pattern)
   // ============================================================
-  function getIrasRecordsByMember(memberId) {
-    return new Promise((resolve) => {
-      const tx = db.transaction(STORE_IRAS_RECORDS, 'readonly');
-      const store = tx.objectStore(STORE_IRAS_RECORDS);
-      const index = store.index('memberId');
-      const request = index.getAll(memberId);
-      request.onsuccess = async () => {
-        const raw = request.result || [];
-        const decrypted = await Promise.all(raw.map(async row => {
-          const payload = await decryptObject(row.encData);
-          return { id: row.id, memberId: row.memberId, ...payload };
-        }));
-        resolve(decrypted);
-      };
-    });
+  async function getIrasRecordsByMember(memberId) {
+    const raw = await reqToPromise(db.transaction(STORE_IRAS_RECORDS, 'readonly').objectStore(STORE_IRAS_RECORDS).index('memberId').getAll(memberId));
+    return decryptRowsTolerant(STORE_IRAS_RECORDS, raw || [], normalizeIrasRecord);
   }
 
-  function getAllIrasRecords() {
-    return new Promise((resolve) => {
-      const tx = db.transaction(STORE_IRAS_RECORDS, 'readonly');
-      const store = tx.objectStore(STORE_IRAS_RECORDS);
-      const request = store.getAll();
-      request.onsuccess = async () => {
-        const raw = request.result || [];
-        const decrypted = await Promise.all(raw.map(async row => {
-          const payload = await decryptObject(row.encData);
-          return { id: row.id, memberId: row.memberId, ...payload };
-        }));
-        resolve(decrypted);
-      };
-    });
+  async function getAllIrasRecords() {
+    const raw = await reqToPromise(db.transaction(STORE_IRAS_RECORDS, 'readonly').objectStore(STORE_IRAS_RECORDS).getAll());
+    return decryptRowsTolerant(STORE_IRAS_RECORDS, raw || [], normalizeIrasRecord);
   }
 
   async function saveIrasRecordToDB(record) {
+    await ensureSessionCurrent();
     const { id, memberId, ...payload } = record;
     const encData = await encryptObject(payload);
     const toStore = { memberId, encData };
     if (id !== undefined && id !== null) toStore.id = id;
-    return new Promise((resolve) => {
-      const tx = db.transaction(STORE_IRAS_RECORDS, 'readwrite');
-      const store = tx.objectStore(STORE_IRAS_RECORDS);
-      const request = store.put(toStore);
-      request.onsuccess = () => resolve(request.result);
-    });
+    const tx = db.transaction(STORE_IRAS_RECORDS, 'readwrite');
+    const done = txDone(tx);
+    const key = await reqToPromise(tx.objectStore(STORE_IRAS_RECORDS).put(toStore));
+    await done;
+    return key;
   }
 
-  function deleteIrasRecordFromDB(id) {
-    return new Promise((resolve) => {
-      const tx = db.transaction(STORE_IRAS_RECORDS, 'readwrite');
-      const store = tx.objectStore(STORE_IRAS_RECORDS);
-      const request = store.delete(id);
-      request.onsuccess = () => resolve();
-    });
+  async function deleteIrasRecordFromDB(id) {
+    await ensureSessionCurrent();
+    const tx = db.transaction(STORE_IRAS_RECORDS, 'readwrite');
+    const done = txDone(tx);
+    tx.objectStore(STORE_IRAS_RECORDS).delete(id);
+    await done;
   }
 
+  // Deleting a member and everything of theirs happens in ONE transaction,
+  // by key (no decryption needed), so it is all-or-nothing.
   async function deleteMemberCascade(memberId) {
-    const records = await getRecordsByMember(memberId);
-    for (const r of records) await deleteRecordFromDB(r.id);
-    const irasRecords = await getIrasRecordsByMember(memberId);
-    for (const r of irasRecords) await deleteIrasRecordFromDB(r.id);
-    await deleteMemberFromDB(memberId);
+    await ensureSessionCurrent();
+    const tx = db.transaction([STORE_RECORDS, STORE_IRAS_RECORDS, STORE_MEMBERS], 'readwrite');
+    const done = txDone(tx);
+    const recStore = tx.objectStore(STORE_RECORDS);
+    const irasStore = tx.objectStore(STORE_IRAS_RECORDS);
+    const recKeys = await reqToPromise(recStore.index('memberId').getAllKeys(memberId));
+    const irasKeys = await reqToPromise(irasStore.index('memberId').getAllKeys(memberId));
+    recKeys.forEach(k => recStore.delete(k));
+    irasKeys.forEach(k => irasStore.delete(k));
+    tx.objectStore(STORE_MEMBERS).delete(memberId);
+    await done;
   }
 
-  function clearAllData() {
-    return new Promise((resolve) => {
-      const tx = db.transaction([STORE_RECORDS, STORE_MEMBERS, STORE_IRAS_RECORDS], 'readwrite');
-      tx.objectStore(STORE_RECORDS).clear();
-      tx.objectStore(STORE_MEMBERS).clear();
-      tx.objectStore(STORE_IRAS_RECORDS).clear();
-      tx.oncomplete = () => resolve();
-    });
+  // All-or-nothing bulk write used by Change Passcode and Import.
+  // The rows (and the new vault record, if any) are ALREADY encrypted in
+  // memory; this only writes them, in one transaction. If anything fails
+  // the transaction is aborted and the database is left exactly as it was.
+  // It also re-checks the vault epoch inside the transaction, so a window
+  // holding an out-of-date key can never overwrite newer data.
+  async function commitBulk({ clearFirst, members, records, irasRecords, newMeta }) {
+    const tx = db.transaction([STORE_MEMBERS, STORE_RECORDS, STORE_IRAS_RECORDS, STORE_VAULT], 'readwrite');
+    const done = txDone(tx);
+    let stale = false;
+    try {
+      const cur = await reqToPromise(tx.objectStore(STORE_VAULT).get('vault'));
+      if (!cur || (cur.epoch || '') !== (sessionEpoch || '')) {
+        stale = true;
+        tx.abort();
+      } else {
+        const mStore = tx.objectStore(STORE_MEMBERS);
+        const rStore = tx.objectStore(STORE_RECORDS);
+        const iStore = tx.objectStore(STORE_IRAS_RECORDS);
+        if (clearFirst) { mStore.clear(); rStore.clear(); iStore.clear(); }
+        members.forEach(row => mStore.put(row));
+        records.forEach(row => rStore.put(row));
+        irasRecords.forEach(row => iStore.put(row));
+        if (newMeta) tx.objectStore(STORE_VAULT).put({ id: 'vault', ...newMeta });
+      }
+    } catch (e) {
+      try { tx.abort(); } catch (_) { /* already finished */ }
+    }
+    try {
+      await done;
+    } catch (e) {
+      if (stale) {
+        const se = new Error('The passcode was changed in another window of this app. Unlock again with the new passcode.');
+        se.isStale = true;
+        lockApp(se.message);
+        throw se;
+      }
+      throw e;
+    }
   }
 
   // ============================================================
@@ -498,6 +694,261 @@
   // importable even after the app passcode is later changed)
   // ============================================================
   let pendingImportPayload = null; // holds a parsed *encrypted* backup awaiting its passcode
+
+  // ------------------------------------------------------------
+  // Attachment checking (v16). Used when a file is attached, when a backup
+  // is imported and when an attachment is opened. An attachment must be a
+  // base64 data URL; its type is kept only if it is a PDF or an image, any
+  // other type is stored as a plain download (application/octet-stream) so
+  // that "Save a Copy" can never hand out something a browser would run;
+  // the file name loses path separators and control characters.
+  // ------------------------------------------------------------
+  const MAX_ATTACHMENT_BYTES = 8 * 1024 * 1024;
+  const MAX_ATTACHMENT_CHARS = Math.ceil(MAX_ATTACHMENT_BYTES * 4 / 3) + 16;
+  const SAFE_IMAGE_MIME = /^image\/[a-z0-9][a-z0-9.+-]{0,60}$/;
+  const BASE64_BODY = /^[A-Za-z0-9+\/]*={0,2}$/;
+
+  function safeFileName(name) {
+    const n = (typeof name === 'string' ? name : '').replace(/[\u0000-\u001f\u007f\\\/:*?"<>|]+/g, '_').trim();
+    return (n || 'attachment').slice(0, 200);
+  }
+
+  function normalizeAttachment(att, maxChars) {
+    if (!att || typeof att !== 'object' || typeof att.data !== 'string') return null;
+    const comma = att.data.indexOf(',');
+    if (comma < 0) return null;
+    const header = att.data.slice(0, comma);
+    if (!/^data:[^;,]*(;[a-z0-9=._+-]+)*;base64$/i.test(header)) return null;
+    const body = att.data.slice(comma + 1);
+    if (maxChars && body.length > maxChars) return null;
+    if (!BASE64_BODY.test(body)) return null;
+    let mime = header.slice(5).split(';')[0].toLowerCase();
+    if (!(mime === 'application/pdf' || SAFE_IMAGE_MIME.test(mime))) mime = 'application/octet-stream';
+    return { name: safeFileName(att.name), type: mime, data: 'data:' + mime + ';base64,' + body };
+  }
+
+  // ------------------------------------------------------------
+  // Backup validation (v16). A backup file is untrusted input: it is
+  // checked completely BEFORE anything in the database is touched, and a
+  // problem produces a plain message that says what is wrong. Values are
+  // converted to the exact types the screens expect.
+  // ------------------------------------------------------------
+  const IMPORT_LIMITS = { members: 500, records: 50000, attachmentsPerRecord: 100 };
+  const MAX_ID = 2147483647;
+
+  function importFail(msg) { throw new Error(msg); }
+  function importInt(v, min, max, label, required) {
+    if (v === null || v === undefined || v === '') {
+      if (required) importFail(label + ' is missing.');
+      return null;
+    }
+    const n = (typeof v === 'number') ? v : ((typeof v === 'string' && /^-?\d+$/.test(v.trim())) ? parseInt(v, 10) : NaN);
+    if (!Number.isInteger(n) || n < min || n > max) importFail(label + ' must be a whole number between ' + min + ' and ' + max + '.');
+    return n;
+  }
+  function importNum(v, label) {
+    if (v === null || v === undefined || v === '') return null;
+    const n = (typeof v === 'number') ? v : ((typeof v === 'string' && v.trim() !== '') ? Number(v) : NaN);
+    if (!Number.isFinite(n) || Math.abs(n) > 1e12) importFail(label + ' must be a number.');
+    return n;
+  }
+  function importText(v, max, label) {
+    if (v === null || v === undefined) return null;
+    if (typeof v !== 'string') importFail(label + ' must be text.');
+    const t = v.replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F]/g, '');
+    if (t.length > max) importFail(label + ' is too long.');
+    return t;
+  }
+  function importDate(v, label) {
+    if (v === null || v === undefined || v === '') return null;
+    if (typeof v !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(v) || isNaN(new Date(v + 'T00:00:00').getTime())) {
+      importFail(label + ' must be a date like 2026-12-31.');
+    }
+    return v;
+  }
+
+  function validateBackup(d) {
+    if (!d || typeof d !== 'object' || Array.isArray(d)) importFail('The file does not look like a Tax Tracker backup.');
+    if (!Array.isArray(d.members) || !Array.isArray(d.records)) importFail('The file does not look like a Tax Tracker backup (the member and record lists are missing).');
+    const rawIras = (d.irasRecords === undefined || d.irasRecords === null) ? [] : d.irasRecords;
+    if (!Array.isArray(rawIras)) importFail('The IRAS record list in the file is not a list.');
+    if (d.members.length === 0) importFail('The file contains no members, so importing it would only erase your data.');
+    if (d.members.length > IMPORT_LIMITS.members) importFail('The file has too many members (limit ' + IMPORT_LIMITS.members + ').');
+    if (d.records.length > IMPORT_LIMITS.records || rawIras.length > IMPORT_LIMITS.records) importFail('The file has too many records (limit ' + IMPORT_LIMITS.records + ').');
+
+    let attachmentCount = 0, skippedAttachments = 0, orphanCount = 0;
+
+    const processAttachments = (list, where) => {
+      if (list === undefined || list === null) return [];
+      if (!Array.isArray(list)) importFail(where + ': attachments must be a list.');
+      if (list.length > IMPORT_LIMITS.attachmentsPerRecord) importFail(where + ': too many attachments.');
+      const out = [];
+      for (const a of list) {
+        const norm = normalizeAttachment(a, MAX_ATTACHMENT_CHARS);
+        if (norm) { out.push(norm); attachmentCount++; } else { skippedAttachments++; }
+      }
+      return out;
+    };
+
+    const memberIds = new Set();
+    const members = d.members.map((m, i) => {
+      const where = 'Member #' + (i + 1);
+      if (!m || typeof m !== 'object') importFail(where + ' is not valid.');
+      const id = importInt(m.id, 1, MAX_ID, where + ': id', true);
+      if (memberIds.has(id)) importFail(where + ': the id ' + id + ' appears twice.');
+      memberIds.add(id);
+      const name = (importText(m.name, 100, where + ': name') || '').trim();
+      if (!name) importFail(where + ': the name is empty.');
+      let taxTypes;
+      if (m.taxTypes === undefined || m.taxTypes === null) {
+        taxTypes = { lhdn: true, iras: true };
+      } else {
+        if (typeof m.taxTypes !== 'object') importFail(where + ': tax types are not valid.');
+        taxTypes = { lhdn: m.taxTypes.lhdn === true, iras: m.taxTypes.iras === true };
+        if (!taxTypes.lhdn && !taxTypes.iras) importFail(where + ': no tax type is enabled.');
+      }
+      let permitStatus = null;
+      if (m.permitStatus !== undefined && m.permitStatus !== null && m.permitStatus !== '') {
+        if (!PERMIT_CODES.includes(m.permitStatus)) importFail(where + ': the pass type must be WP, SP, EP or PR.');
+        permitStatus = m.permitStatus;
+      }
+      return {
+        id, name, taxTypes,
+        birthYear: importInt(m.birthYear, 1800, 2200, where + ': birth year', false),
+        permitStatus,
+        permitFrom: importDate(m.permitFrom, where + ': pass start date'),
+        permitTill: importDate(m.permitTill, where + ': pass end date')
+      };
+    });
+
+    const recordIds = new Set();
+    const records = [];
+    d.records.forEach((r, i) => {
+      const where = 'LHDN record #' + (i + 1);
+      if (!r || typeof r !== 'object') importFail(where + ' is not valid.');
+      const memberId = importInt(r.memberId, 1, MAX_ID, where + ': member', true);
+      if (!memberIds.has(memberId)) { orphanCount++; return; }
+      const id = importInt(r.id, 1, MAX_ID, where + ': id', false);
+      if (id !== null) {
+        if (recordIds.has(id)) importFail(where + ': the id ' + id + ' appears twice.');
+        recordIds.add(id);
+      }
+      if (r.sources !== undefined && r.sources !== null && !Array.isArray(r.sources)) importFail(where + ': income sources must be a list.');
+      const sources = (r.sources || []).map((src, j) => {
+        if (!src || typeof src !== 'object') importFail(where + ': income source #' + (j + 1) + ' is not valid.');
+        return { name: importText(src.name, 200, where + ': source name') || '', amount: importNum(src.amount, where + ': source amount') || 0 };
+      });
+      const derived = sources.reduce((sum, x) => sum + x.amount, 0);
+      const totalDerivedIncome = importNum(r.totalDerivedIncome, where + ': derived income');
+      const incomeDeclared = importNum(r.incomeDeclared, where + ': declared income');
+      const taxAmount = importNum(r.taxAmount, where + ': tax amount');
+      const declared = incomeDeclared === null ? derived : incomeDeclared;
+      const incomeAfterTax = importNum(r.incomeAfterTax, where + ': income after tax');
+      const incomeVsSourceDiff = importNum(r.incomeVsSourceDiff, where + ': income difference');
+      const rec = {
+        memberId,
+        yearWorking: importInt(r.yearWorking, 1900, 2200, where + ': working year', true),
+        yearSubmit: importInt(r.yearSubmit, 1900, 2200, where + ': submit year', false),
+        tahunTaksiran: importInt(r.tahunTaksiran, 1900, 2200, where + ': Tahun Taksiran', false),
+        sources,
+        totalDerivedIncome: totalDerivedIncome === null ? derived : totalDerivedIncome,
+        incomeDeclared: declared,
+        incomeDeclaredManual: r.incomeDeclaredManual === true,
+        incomeVsSourceDiff: incomeVsSourceDiff === null ? (declared - derived) : incomeVsSourceDiff,
+        taxAmount,
+        incomeAfterTax: incomeAfterTax === null ? (declared - (taxAmount || 0)) : incomeAfterTax,
+        lhdnYear: importInt(r.lhdnYear, 1900, 2200, where + ': LHDN adjustment year', false),
+        lhdnAdjustedIncome: importNum(r.lhdnAdjustedIncome, where + ': adjusted income'),
+        lhdnAdjustedTax: importNum(r.lhdnAdjustedTax, where + ': adjusted tax'),
+        attachments: processAttachments(r.attachments, where)
+      };
+      if (id !== null) rec.id = id;
+      records.push(rec);
+    });
+
+    const irasIds = new Set();
+    const irasRecords = [];
+    rawIras.forEach((r, i) => {
+      const where = 'IRAS record #' + (i + 1);
+      if (!r || typeof r !== 'object') importFail(where + ' is not valid.');
+      const memberId = importInt(r.memberId, 1, MAX_ID, where + ': member', true);
+      if (!memberIds.has(memberId)) { orphanCount++; return; }
+      const id = importInt(r.id, 1, MAX_ID, where + ': id', false);
+      if (id !== null) {
+        if (irasIds.has(id)) importFail(where + ': the id ' + id + ' appears twice.');
+        irasIds.add(id);
+      }
+      const rec = {
+        memberId,
+        yearWorking: importInt(r.yearWorking, 1900, 2200, where + ': working year', true),
+        yearSubmit: importInt(r.yearSubmit, 1900, 2200, where + ': submit year', false),
+        noa: importText(r.noa, 100, where + ': NOA'),
+        noaIncome: importNum(r.noaIncome, where + ': assessable income'),
+        taxPayment: importNum(r.taxPayment, where + ': tax payment'),
+        note: importText(r.note, 2000, where + ': note'),
+        attachments: processAttachments(r.attachments, where)
+      };
+      if (id !== null) rec.id = id;
+      irasRecords.push(rec);
+    });
+
+    const notes = [];
+    if (orphanCount) notes.push('• ' + orphanCount + ' record(s) belong to a member that is not in the file and will be skipped.');
+    if (skippedAttachments) notes.push('• ' + skippedAttachments + ' attachment(s) are damaged or unreadable and will be skipped.');
+    return { members, records, irasRecords, attachmentCount, notes };
+  }
+
+  // Encrypts everything in memory first, then replaces the database in ONE
+  // transaction: if anything fails, the existing data is left untouched.
+  async function commitImport(clean) {
+    await ensureSessionCurrent();
+    const members = [];
+    for (const m of clean.members) {
+      const { id, ...payload } = m;
+      members.push({ id, encData: await encryptObject(payload) });
+    }
+    const records = [];
+    for (const r of clean.records) {
+      const { id, memberId, ...payload } = r;
+      const row = { memberId, encData: await encryptObject(payload) };
+      if (id !== undefined) row.id = id;
+      records.push(row);
+    }
+    const irasRecords = [];
+    for (const r of clean.irasRecords) {
+      const { id, memberId, ...payload } = r;
+      const row = { memberId, encData: await encryptObject(payload) };
+      if (id !== undefined) row.id = id;
+      irasRecords.push(row);
+    }
+    await commitBulk({ clearFirst: true, members, records, irasRecords });
+  }
+
+  async function startImport(data) {
+    const clean = validateBackup(data);               // throws a readable Error if the file is not usable
+    const current = {
+      members: (await getAllRaw(STORE_MEMBERS)).length,
+      records: (await getAllRaw(STORE_RECORDS)).length,
+      iras: (await getAllRaw(STORE_IRAS_RECORDS)).length
+    };
+    let msg = 'Replace ALL data in this app with the contents of this file?\n\n' +
+      'In the file: ' + clean.members.length + ' member(s), ' + clean.records.length + ' LHDN record(s), ' +
+      clean.irasRecords.length + ' IRAS record(s), ' + clean.attachmentCount + ' attachment(s).\n' +
+      'In the app now: ' + current.members + ' member(s), ' + current.records + ' LHDN record(s), ' + current.iras + ' IRAS record(s).\n\n';
+    if (clean.notes.length) msg += clean.notes.join('\n') + '\n\n';
+    msg += 'Nothing is replaced unless the whole file imports successfully.';
+    if (!confirm(msg)) return;
+
+    await commitImport(clean);
+    unreadableKeys.clear();
+    updateDataWarning();
+    alert('Import completed successfully!');
+    // A full data reload resets straight to the home/Overview screen —
+    // drop any tracked overlays rather than closing them one by one.
+    navStack.length = 0;
+    await backToOverview();
+    await initApp();
+  }
 
   function openExportModal() {
     document.getElementById('exportEncryptToggle').checked = true;
@@ -515,13 +966,15 @@
     const members = await getMembers();
     const prevValue = select.value || 'all';
     select.innerHTML = '<option value="all">All Members</option>' +
-      members.map(m => `<option value="${m.id}">${escapeHtml(m.name)}</option>`).join('');
+      members.map(m => `<option value="${safeId(m.id)}">${escapeHtml(m.name)}</option>`).join('');
     // Preserve the previous selection if that member still exists, else fall back to "all".
     select.value = Array.from(select.options).some(o => o.value === prevValue) ? prevValue : 'all';
   }
 
   function closeExportModal() {
     document.getElementById('exportModal').classList.remove('open');
+    document.getElementById('exportPasscode').value = '';
+    document.getElementById('exportPasscodeConfirm').value = '';
   }
 
   function updateExportModalView() {
@@ -540,55 +993,70 @@
     const encrypt = document.getElementById('exportEncryptToggle').checked;
     document.getElementById('exportError').style.display = 'none';
 
-    const scopeVal = document.getElementById('exportMemberScope').value;
-    const scopeMemberId = scopeVal !== 'all' ? parseInt(scopeVal, 10) : null;
+    const exportBtn = document.getElementById('performExportBtn');
+    const exportBtnLabel = exportBtn.textContent;
+    exportBtn.disabled = true;
+    exportBtn.textContent = 'Preparing…';
+    try {
+      const scopeVal = document.getElementById('exportMemberScope').value;
+      const scopeMemberId = scopeVal !== 'all' ? parseInt(scopeVal, 10) : null;
 
-    let members = await getMembers();
-    let records = await getAllRecords();
-    let irasRecords = await getAllIrasRecords();
+      let members = await getMembers();
+      let records = await getAllRecords();
+      let irasRecords = await getAllIrasRecords();
 
-    let scopedMemberName = null;
-    if (scopeMemberId !== null) {
-      const scopedMember = members.find(m => m.id === scopeMemberId);
-      scopedMemberName = scopedMember ? scopedMember.name : null;
-      members = members.filter(m => m.id === scopeMemberId);
-      records = records.filter(r => r.memberId === scopeMemberId);
-      irasRecords = irasRecords.filter(r => r.memberId === scopeMemberId);
+      let scopedMemberName = null;
+      if (scopeMemberId !== null) {
+        const scopedMember = members.find(m => m.id === scopeMemberId);
+        scopedMemberName = scopedMember ? scopedMember.name : null;
+        members = members.filter(m => m.id === scopeMemberId);
+        records = records.filter(r => r.memberId === scopeMemberId);
+        irasRecords = irasRecords.filter(r => r.memberId === scopeMemberId);
+      }
+
+      if (records.length === 0 && members.length === 0 && irasRecords.length === 0) {
+        showExportError('No tax records found to export.');
+        return;
+      }
+
+      let payload;
+
+      if (encrypt) {
+        const p1 = document.getElementById('exportPasscode').value;
+        const p2 = document.getElementById('exportPasscodeConfirm').value;
+        if (p1.length < 6) { showExportError('Backup passcode must be at least 6 characters.'); return; }
+        if (p1 !== p2) { showExportError('Backup passcodes do not match.'); return; }
+
+        const salt = bufToB64(crypto.getRandomValues(new Uint8Array(16)));
+        const backupKey = await deriveKeyFromPasscode(p1, salt, PBKDF2_ITERATIONS);
+        const enc = await encryptObject({ members, records, irasRecords }, backupKey);
+        payload = { encrypted: true, iterations: PBKDF2_ITERATIONS, salt, iv: enc.iv, ct: enc.ct };
+      } else {
+        payload = { encrypted: false, members, records, irasRecords };
+      }
+
+      // A Blob download (not a giant data: URL): works for large backups with
+      // attachments and does not build a second multi-megabyte string.
+      const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const downloadAnchor = document.createElement('a');
+
+      const today = new Date().toISOString().split('T')[0];
+      const scopeSlug = scopedMemberName ? '_' + scopedMemberName.trim().replace(/[^a-z0-9]+/gi, '-').replace(/^-+|-+$/g, '') : '';
+      downloadAnchor.setAttribute('href', url);
+      downloadAnchor.setAttribute('download', `tax_records_backup_${today}${scopeSlug}${encrypt ? '_encrypted' : ''}.json`);
+      document.body.appendChild(downloadAnchor);
+      downloadAnchor.click();
+      downloadAnchor.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 60000);
+
+      document.getElementById('exportPasscode').value = '';
+      document.getElementById('exportPasscodeConfirm').value = '';
+      requestCloseLayer('exportModal');
+    } finally {
+      exportBtn.disabled = false;
+      exportBtn.textContent = exportBtnLabel;
     }
-
-    if (records.length === 0 && members.length === 0 && irasRecords.length === 0) {
-      showExportError('No tax records found to export.');
-      return;
-    }
-
-    let payload;
-
-    if (encrypt) {
-      const p1 = document.getElementById('exportPasscode').value;
-      const p2 = document.getElementById('exportPasscodeConfirm').value;
-      if (p1.length < 6) { showExportError('Backup passcode must be at least 6 characters.'); return; }
-      if (p1 !== p2) { showExportError('Backup passcodes do not match.'); return; }
-
-      const salt = bufToB64(crypto.getRandomValues(new Uint8Array(16)));
-      const backupKey = await deriveKeyFromPasscode(p1, salt, PBKDF2_ITERATIONS);
-      const enc = await encryptObject({ members, records, irasRecords }, backupKey);
-      payload = { encrypted: true, iterations: PBKDF2_ITERATIONS, salt, iv: enc.iv, ct: enc.ct };
-    } else {
-      payload = { encrypted: false, members, records, irasRecords };
-    }
-
-    const dataStr = "data:text/json;charset=utf-8," + encodeURIComponent(JSON.stringify(payload, null, 2));
-    const downloadAnchor = document.createElement('a');
-
-    const today = new Date().toISOString().split('T')[0];
-    const scopeSlug = scopedMemberName ? '_' + scopedMemberName.trim().replace(/[^a-z0-9]+/gi, '-').replace(/^-+|-+$/g, '') : '';
-    downloadAnchor.setAttribute("href", dataStr);
-    downloadAnchor.setAttribute("download", `tax_records_backup_${today}${scopeSlug}${encrypt ? '_encrypted' : ''}.json`);
-    document.body.appendChild(downloadAnchor);
-    downloadAnchor.click();
-    downloadAnchor.remove();
-
-    requestCloseLayer('exportModal');
   }
 
   async function importJSON(event) {
@@ -596,11 +1064,22 @@
     if (!file) return;
 
     const reader = new FileReader();
+    reader.onerror = () => { alert('The file could not be read. Your data was not changed.'); };
     reader.onload = async (e) => {
+      let importedData;
       try {
-        const importedData = JSON.parse(e.target.result);
-
-        if (importedData.encrypted) {
+        importedData = JSON.parse(e.target.result);
+      } catch (err) {
+        alert('This file is not a valid backup: it cannot be read as JSON. Your data was not changed.');
+        return;
+      }
+      try {
+        if (importedData && importedData.encrypted === true) {
+          if (typeof importedData.salt !== 'string' || typeof importedData.iv !== 'string' || typeof importedData.ct !== 'string' ||
+              safeIterations(importedData.iterations) === null) {
+            alert('This encrypted backup is damaged or uses unsupported settings. Your data was not changed.');
+            return;
+          }
           pendingImportPayload = importedData;
           document.getElementById('importBackupPasscode').value = '';
           document.getElementById('importPasscodeError').style.display = 'none';
@@ -608,16 +1087,9 @@
           pushNavLayer('importPasscodeModal');
           return;
         }
-
-        if (!importedData.members || !importedData.records) {
-          alert("Invalid backup format.");
-          return;
-        }
-
-        await applyImportedData(importedData);
+        await startImport(importedData);
       } catch (err) {
-        alert("Failed to parse JSON backup file.");
-        console.error(err);
+        alert('Import failed. Your existing data was not changed.\n\n' + (err && err.message ? err.message : 'Unknown error.'));
       }
     };
 
@@ -627,6 +1099,7 @@
 
   function closeImportPasscodeModal() {
     document.getElementById('importPasscodeModal').classList.remove('open');
+    document.getElementById('importBackupPasscode').value = '';
     pendingImportPayload = null;
   }
 
@@ -634,57 +1107,24 @@
     const passcode = document.getElementById('importBackupPasscode').value;
     const errEl = document.getElementById('importPasscodeError');
     errEl.style.display = 'none';
+    if (!pendingImportPayload) return;
 
+    let decrypted;
     try {
-      const key = await deriveKeyFromPasscode(passcode, pendingImportPayload.salt, pendingImportPayload.iterations || PBKDF2_ITERATIONS);
-      const decrypted = await decryptObject({ iv: pendingImportPayload.iv, ct: pendingImportPayload.ct }, key);
-
-      if (!decrypted.members || !decrypted.records) {
-        errEl.textContent = 'Invalid backup contents.';
-        errEl.style.display = 'block';
-        return;
-      }
-
-      const dataToImport = decrypted;
-      requestCloseLayer('importPasscodeModal');
-      await applyImportedData(dataToImport);
+      const key = await deriveKeyFromPasscode(passcode, pendingImportPayload.salt, safeIterations(pendingImportPayload.iterations));
+      decrypted = await decryptObject({ iv: pendingImportPayload.iv, ct: pendingImportPayload.ct }, key);
     } catch (err) {
       errEl.textContent = 'Incorrect backup passcode, or corrupted file.';
       errEl.style.display = 'block';
+      return;
     }
-  }
 
-  async function applyImportedData(importedData) {
-    if (confirm("Overwriting existing data with imported backup. Proceed?")) {
-      await clearAllData();
-
-      // Preserve original IDs on import — records reference members by
-      // memberId, so re-adding members with saveMember() (which always
-      // generates a brand-new ID) would silently orphan every record.
-      for (const m of importedData.members) {
-        await updateMemberInDB({
-          id: m.id,
-          name: m.name,
-          taxTypes: m.taxTypes || { lhdn: true, iras: true },
-          birthYear: (m.birthYear !== undefined ? m.birthYear : null),
-          permitStatus: (m.permitStatus !== undefined ? m.permitStatus : null),
-          permitFrom: (m.permitFrom !== undefined ? m.permitFrom : null),
-          permitTill: (m.permitTill !== undefined ? m.permitTill : null)
-        });
-      }
-      for (const r of importedData.records) {
-        await saveRecordToDB(r);
-      }
-      for (const r of (importedData.irasRecords || [])) {
-        await saveIrasRecordToDB(r);
-      }
-
-      alert("Import completed successfully!");
-      // A full data reload resets straight to the home/Overview screen —
-      // drop any tracked overlays rather than closing them one by one.
-      navStack.length = 0;
-      backToOverview();
-      await initApp();
+    document.getElementById('importBackupPasscode').value = '';
+    requestCloseLayer('importPasscodeModal');
+    try {
+      await startImport(decrypted);
+    } catch (err) {
+      alert('Import failed. Your existing data was not changed.\n\n' + (err && err.message ? err.message : 'Unknown error.'));
     }
   }
 
@@ -719,23 +1159,49 @@
     return new Blob([dataURLtoUint8Array(dataUrl)], { type: mime });
   }
 
-  // att: { name, type, data } — data is the base64 data: URL as stored in the record
-  async function openAttachmentViewer(att) {
+  // pdf.js loading task of the open viewer (destroyed on close) and a counter
+  // that lets a slow render notice the viewer was closed or replaced.
+  let avPdfTask = null;
+  let avSession = 0;
+
+  function cleanupViewerResources() {
     avObjectUrls.forEach(url => URL.revokeObjectURL(url));
     avObjectUrls = [];
+    if (avPdfTask) {
+      const task = avPdfTask;
+      avPdfTask = null;
+      try { task.destroy(); } catch (e) { /* already gone */ }
+    }
+  }
 
-    document.getElementById('avTitle').textContent = att.name || 'Attachment';
+  // att: { name, type, data } — data is the base64 data: URL as stored in the record
+  async function openAttachmentViewer(rawAtt) {
+    const session = ++avSession;
+    cleanupViewerResources();
+
+    const att = normalizeAttachment(rawAtt, MAX_ATTACHMENT_CHARS);   // never trust what is stored
+    document.getElementById('avTitle').textContent = (rawAtt && typeof rawAtt.name === 'string' && rawAtt.name) ? rawAtt.name : 'Attachment';
     const saveBtn = document.getElementById('avSaveCopyBtn');
-    saveBtn.setAttribute('download', att.name || 'attachment');
+    const content = document.getElementById('avContent');
+
+    if (!att) {
+      saveBtn.removeAttribute('href');
+      saveBtn.removeAttribute('download');
+      content.innerHTML = '<div style="padding: 40px; text-align: center; color: var(--danger);">This attachment is damaged or not in a supported format, so it cannot be previewed or saved.</div>';
+      document.getElementById('attachmentViewerModal').classList.add('open');
+      pushNavLayer('attachmentViewerModal');
+      return;
+    }
+
+    saveBtn.setAttribute('download', att.name);
     saveBtn.href = att.data;
 
-    const content = document.getElementById('avContent');
     content.innerHTML = '<div style="padding: 40px; text-align: center; color: var(--text-muted);">Loading…</div>';
     document.getElementById('attachmentViewerModal').classList.add('open');
     pushNavLayer('attachmentViewerModal');
 
-    const isImage = att.type && att.type.startsWith('image/');
-    const isPdf = att.type === 'application/pdf' || /\.pdf$/i.test(att.name || '');
+    const isImage = att.type.startsWith('image/');
+    const isPdf = att.type === 'application/pdf' || /\.pdf$/i.test(att.name);
 
     try {
       if (isImage) {
@@ -755,11 +1221,15 @@
           return;
         }
         const bytes = dataURLtoUint8Array(att.data);
-        const pdf = await pdfjsLib.getDocument({ data: bytes }).promise;
+        const task = pdfjsLib.getDocument({ data: bytes, isEvalSupported: false });
+        avPdfTask = task;
+        const pdf = await task.promise;
+        if (session !== avSession) return;
         content.innerHTML = '';
         const containerWidth = content.clientWidth || 700;
         for (let pageNum = 1; pageNum <= pdf.numPages; pageNum++) {
           const page = await pdf.getPage(pageNum);
+          if (session !== avSession) return;
           const unscaledViewport = page.getViewport({ scale: 1 });
           const scale = Math.max(0.1, (containerWidth - 20) / unscaledViewport.width);
           const viewport = page.getViewport({ scale });
@@ -772,19 +1242,23 @@
           content.appendChild(canvas);
           await page.render({ canvasContext: canvas.getContext('2d'), viewport }).promise;
         }
+        // Everything is drawn: release the document and the worker's copy of the bytes.
+        if (avPdfTask === task) { avPdfTask = null; try { task.destroy(); } catch (e) { /* ignore */ } }
       } else {
         content.innerHTML = '<div style="padding: 40px; text-align: center; color: var(--text-muted);">Preview not available for this file type — use "Save a Copy" to download it.</div>';
       }
     } catch (err) {
+      if (session !== avSession) return;
       content.innerHTML = '<div style="padding: 40px; text-align: center; color: var(--danger);">Could not preview this file: ' + escapeHtml(err.message) + '</div>';
     }
   }
 
   function closeAttachmentViewer() {
+    avSession++;                                  // lets a render that is still running stop
     document.getElementById('attachmentViewerModal').classList.remove('open');
-    avObjectUrls.forEach(url => URL.revokeObjectURL(url));
-    avObjectUrls = [];
+    cleanupViewerResources();
     document.getElementById('avContent').innerHTML = '';
+    document.getElementById('avSaveCopyBtn').removeAttribute('href');
   }
 
   // ------------------------------------------------------------
@@ -805,12 +1279,15 @@
     const files = Array.from(event.target.files || []);
     const state = attachmentState[kind];
     files.forEach(file => {
-      if (file.size > 8 * 1024 * 1024) { alert('Skipped "' + file.name + '" — over 8MB.'); return; }
+      if (file.size > MAX_ATTACHMENT_BYTES) { alert('Skipped "' + file.name + '" — over 8MB.'); return; }
       const reader = new FileReader();
       reader.onload = () => {
-        state.pending.push({ name: file.name, type: file.type, data: reader.result });
+        const norm = normalizeAttachment({ name: file.name, type: file.type, data: reader.result }, MAX_ATTACHMENT_CHARS);
+        if (!norm) { alert('Skipped "' + file.name + '" — it could not be read as a file.'); return; }
+        state.pending.push(norm);
         renderAttachmentPreview(kind);
       };
+      reader.onerror = () => { alert('Skipped "' + file.name + '" — it could not be read.'); };
       reader.readAsDataURL(file);
     });
     event.target.value = '';
@@ -1067,9 +1544,21 @@
   }
 
   function formatCurrency(val, currency = 'MYR') {
-    if (val === null || val === undefined || isNaN(val)) return '-';
+    if (val === null || val === undefined || val === '') return '-';
+    const n = Number(val);
+    if (!Number.isFinite(n)) return '-';
     const prefix = currency === 'SGD' ? 'S$' : 'RM';
-    return prefix + ' ' + val.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+    return prefix + ' ' + n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  }
+
+  // For years / ids that end up inside HTML: always a plain number (or "-").
+  function fmtYear(v) {
+    const n = Number(v);
+    return (Number.isFinite(n) && n > 0) ? String(Math.trunc(n)) : '-';
+  }
+  function safeId(v) {
+    const n = Number(v);
+    return Number.isFinite(n) ? String(Math.trunc(n)) : '0';
   }
 
   // ============================================================
@@ -1192,6 +1681,14 @@
     document.getElementById('appContainer').style.display = 'flex';
   }
 
+  function clearPasscodeFields() {
+    ['setupPasscode', 'setupPasscodeConfirm', 'unlockPasscode', 'currentPasscodeInput', 'newPasscodeInput',
+     'newPasscodeConfirmInput', 'importBackupPasscode', 'exportPasscode', 'exportPasscodeConfirm'].forEach(id => {
+      const el = document.getElementById(id);
+      if (el) el.value = '';
+    });
+  }
+
   async function handleSetupPasscode() {
     const p1 = document.getElementById('setupPasscode').value;
     const p2 = document.getElementById('setupPasscodeConfirm').value;
@@ -1204,16 +1701,21 @@
       const salt = bufToB64(crypto.getRandomValues(new Uint8Array(16)));
       vaultKey = await deriveKeyFromPasscode(p1, salt, PBKDF2_ITERATIONS);
       const verify = await encryptObject(VAULT_CHECK_STRING);
-      await saveVaultMeta({ salt, verify, iterations: PBKDF2_ITERATIONS, idleLockMinutes: DEFAULT_IDLE_LOCK_MINUTES });
+      const epoch = randomHex(16);
+      await saveVaultMeta({ salt, verify, iterations: PBKDF2_ITERATIONS, idleLockMinutes: DEFAULT_IDLE_LOCK_MINUTES, epoch });
+      sessionEpoch = epoch;
+      unreadableKeys.clear();
 
       // Encrypt any pre-existing plaintext data from before this feature existed.
       await migrateLegacyDataToEncrypted();
 
+      clearPasscodeFields();
       showApp();
       await initApp();
     } catch (err) {
       console.error(err);
       vaultKey = null;
+      sessionEpoch = null;
       showLockError('Failed to set up encryption. Please try again.');
     }
   }
@@ -1230,6 +1732,9 @@
       if (!key) { showLockError('Incorrect passcode. Please try again.'); return; }
 
       vaultKey = key;
+      sessionEpoch = meta.epoch || '';
+      unreadableKeys.clear();
+      clearPasscodeFields();        // the passcode must not stay in the page while the app is open
       showApp();
       await initApp();
     } catch (err) {
@@ -1238,16 +1743,65 @@
     }
   }
 
-  function lockApp() {
+  // Empties everything that was decrypted for display, closes every open
+  // layer and drops what is held in memory. The lock screen alone only covers
+  // the page; this makes sure nothing readable is left underneath it.
+  function clearSensitiveDom() {
+    ['overviewCardsGrid', 'recordsTableBody', 'irasTableBody', 'companyReportBody', 'companyReportCards',
+     'membersModalList', 'incomeSourcesContainer', 'companyList', 'lhdnAttachmentPreview', 'irasAttachmentPreview',
+     'avContent'].forEach(id => {
+      const el = document.getElementById(id);
+      if (el) el.innerHTML = '';
+    });
+    ['permitReminderBanner', 'dataWarningBanner'].forEach(id => {
+      const el = document.getElementById(id);
+      if (el) { el.innerHTML = ''; el.style.display = 'none'; }
+    });
+    ['ledgerMemberName', 'summaryNetIncome', 'summaryTaxPaid', 'irasSummaryNetIncome', 'irasSummaryTotalIncome',
+     'irasSummaryTaxPaid', 'irasSummaryYears', 'avTitle'].forEach(id => {
+      const el = document.getElementById(id);
+      if (el) el.textContent = '';
+    });
+    ownerFilter.innerHTML = '<option value="all">All Owners</option>';
+    ['quickAddMember', 'exportMemberScope'].forEach(id => {
+      const el = document.getElementById(id);
+      if (el) el.innerHTML = '';
+    });
+  }
+
+  function lockApp(message) {
     stopIdleTimer();
     vaultKey = null;
+    sessionEpoch = null;
     currentMemberId = null;
     ledgerMemberId = null;
     ledgerType = null;
     currentMemberBirthYear = null;
+    pendingImportPayload = null;
+    unreadableKeys.clear();
+
+    // Close every open layer (modals, attachment viewer) and forget the back-button stack.
+    avSession++;
+    cleanupViewerResources();
+    navStack.length = 0;
+    ['membersModal', 'quickAddModal', 'exportModal', 'importPasscodeModal', 'changePasscodeModal', 'attachmentViewerModal']
+      .forEach(id => { const el = document.getElementById(id); if (el) el.classList.remove('open'); });
+    const saveBtn = document.getElementById('avSaveCopyBtn');
+    if (saveBtn) saveBtn.removeAttribute('href');
+
+    // Unsaved form content and staged attachments.
+    resetForm();
+    resetIrasForm();
+    collapseEntryForms();
+    attachmentState.lhdn = { pending: [], existing: [], removed: new Set() };
+    attachmentState.iras = { pending: [], existing: [], removed: new Set() };
+
+    clearSensitiveDom();
+    clearPasscodeFields();
     document.getElementById('ledgerView').style.display = 'none';
     document.getElementById('overviewView').style.display = 'block';
     showLockScreen('unlock');
+    if (typeof message === 'string' && message) showLockError(message);
   }
 
   function openChangePasscodeModal() {
@@ -1261,8 +1815,17 @@
 
   function closeChangePasscodeModal() {
     document.getElementById('changePasscodeModal').classList.remove('open');
+    document.getElementById('currentPasscodeInput').value = '';
+    document.getElementById('newPasscodeInput').value = '';
+    document.getElementById('newPasscodeConfirmInput').value = '';
   }
 
+  // Change Passcode is ALL-OR-NOTHING (v16). Everything is decrypted with the
+  // old key and re-encrypted with the new key IN MEMORY first; only then are
+  // all rows and the new vault record (new salt, check value, epoch) written
+  // in ONE transaction. If anything goes wrong — including the tab being
+  // closed half-way — the database still holds the old data under the old
+  // passcode. The new key replaces the old one in memory only after commit.
   async function handleChangePasscode() {
     const current = document.getElementById('currentPasscodeInput').value;
     const next = document.getElementById('newPasscodeInput').value;
@@ -1280,33 +1843,76 @@
     changeBtn.textContent = 'Updating…';
 
     try {
+      await ensureSessionCurrent();
       const meta = await getVaultMeta();
       const testKey = await verifyPasscode(current, meta);
       if (!testKey) { showErr('Current passcode is incorrect.'); return; }
 
-      // Decrypt everything under the old key first (via the normal, already-
-      // decryption-aware getters, since vaultKey is still the old key here).
-      const members = await getMembers();
-      const records = await getAllRecords();
-      const irasRecords = await getAllIrasRecords();
+      // Strictly decrypt every row under the old key. A row that cannot be
+      // read would be lost by re-encrypting, so refuse to go on in that case.
+      const readAll = async (storeName) => {
+        const rows = await getAllRaw(storeName);
+        const payloads = [];
+        for (const row of rows) {
+          let payload;
+          try {
+            if (row.encData) {
+              payload = await decryptObject(row.encData);
+            } else {
+              const { id, memberId, ...rest } = row;
+              payload = rest;
+            }
+          } catch (e) {
+            const err = new Error('UNREADABLE');
+            err.unreadable = true;
+            throw err;
+          }
+          payloads.push({ row, payload });
+        }
+        return payloads;
+      };
+      let oldMembers, oldRecords, oldIras;
+      try {
+        oldMembers = await readAll(STORE_MEMBERS);
+        oldRecords = await readAll(STORE_RECORDS);
+        oldIras = await readAll(STORE_IRAS_RECORDS);
+      } catch (e) {
+        if (e.unreadable) {
+          showErr('Some saved items cannot be read with the current passcode, so the passcode was NOT changed (changing it would make them unrecoverable). Export what you can see and keep your older backups first.');
+          return;
+        }
+        throw e;
+      }
 
-      // Derive the new key, then re-encrypt every row under it.
+      // Derive the new key and encrypt everything under it, in memory.
       const newSalt = bufToB64(crypto.getRandomValues(new Uint8Array(16)));
       const newKey = await deriveKeyFromPasscode(next, newSalt, PBKDF2_ITERATIONS);
+      const newMembers = [];
+      for (const { row, payload } of oldMembers) newMembers.push({ id: row.id, encData: await encryptObject(payload, newKey) });
+      const newRecords = [];
+      for (const { row, payload } of oldRecords) newRecords.push({ id: row.id, memberId: row.memberId, encData: await encryptObject(payload, newKey) });
+      const newIras = [];
+      for (const { row, payload } of oldIras) newIras.push({ id: row.id, memberId: row.memberId, encData: await encryptObject(payload, newKey) });
+      const verify = await encryptObject(VAULT_CHECK_STRING, newKey);
+      const newEpoch = randomHex(16);
+      const newMeta = { salt: newSalt, verify, iterations: PBKDF2_ITERATIONS, idleLockMinutes: meta.idleLockMinutes, epoch: newEpoch };
+
+      // Single transaction: rows + new vault record, or nothing.
+      await commitBulk({ clearFirst: false, members: newMembers, records: newRecords, irasRecords: newIras, newMeta });
 
       vaultKey = newKey;
-      for (const m of members) await updateMemberInDB(m);
-      for (const r of records) await saveRecordToDB(r);
-      for (const r of irasRecords) await saveIrasRecordToDB(r);
+      sessionEpoch = newEpoch;
+      if (syncChannel) syncChannel.postMessage({ type: 'passcode-changed' });
 
-      const verify = await encryptObject(VAULT_CHECK_STRING);
-      await saveVaultMeta({ salt: newSalt, verify, iterations: PBKDF2_ITERATIONS, idleLockMinutes: meta.idleLockMinutes });
-
+      document.getElementById('currentPasscodeInput').value = '';
+      document.getElementById('newPasscodeInput').value = '';
+      document.getElementById('newPasscodeConfirmInput').value = '';
       requestCloseLayer('changePasscodeModal');
       alert('Passcode updated successfully.');
     } catch (err) {
+      if (err && err.isStale) return;            // the lock screen already explains it
       console.error(err);
-      showErr('Failed to update passcode. Please try again.');
+      showErr('The passcode was NOT changed and your data is unchanged. ' + (err && err.name === 'QuotaExceededError' ? 'There is not enough free storage on this device.' : 'Please try again.'));
     } finally {
       changeBtn.disabled = false;
       changeBtn.textContent = 'Update Passcode';
@@ -1318,7 +1924,9 @@
   // ============================================================
   async function initApp() {
     let members = await getMembers();
-    if (members.length === 0) {
+    // Only a store that is really empty gets the two starter members; unreadable
+    // rows must never be mistaken for "no members".
+    if (members.length === 0 && (await getAllRaw(STORE_MEMBERS)).length === 0) {
       await saveMember("Husband", { lhdn: true, iras: true });
       await saveMember("Wife", { lhdn: true, iras: true });
     }
@@ -1332,6 +1940,11 @@
     const idleLockSelect = document.getElementById('idleLockSelect');
     if (idleLockSelect) idleLockSelect.value = String(idleLockMinutes);
     resetIdleTimer();
+
+    // Ask the browser not to evict this data when the device runs low on space.
+    if (navigator.storage && navigator.storage.persist) {
+      navigator.storage.persist().catch(() => { /* a refusal is not an error */ });
+    }
   }
 
   async function handleIdleLockChange() {
@@ -1345,7 +1958,7 @@
     const members = await getMembers();
     const prevVal = ownerFilter.value || 'all';
     ownerFilter.innerHTML = `<option value="all">All Owners</option>` +
-      members.map(m => `<option value="${m.id}">${escapeHtml(m.name)}</option>`).join('');
+      members.map(m => `<option value="${safeId(m.id)}">${escapeHtml(m.name)}</option>`).join('');
     ownerFilter.value = members.some(m => String(m.id) === prevVal) ? prevVal : 'all';
   }
 
@@ -1387,7 +2000,7 @@
         const records = await getRecordsByMember(m.id);
         const totals = computeLhdnTotals(records);
         cardsHtml += `
-          <div class="member-card lhdn-card" data-action="open-ledger" data-id="${m.id}" data-type="lhdn">
+          <div class="member-card lhdn-card" data-action="open-ledger" data-id="${safeId(m.id)}" data-type="lhdn">
             <div class="member-card-badge">LHDN · Malaysia</div>
             <div class="member-card-name">${escapeHtml(m.name)}</div>
             <div class="member-card-stats">
@@ -1403,7 +2016,7 @@
         const irasRecords = await getIrasRecordsByMember(m.id);
         const totals = computeIrasTotals(irasRecords);
         cardsHtml += `
-          <div class="member-card iras-card" data-action="open-ledger" data-id="${m.id}" data-type="iras">
+          <div class="member-card iras-card" data-action="open-ledger" data-id="${safeId(m.id)}" data-type="iras">
             <div class="member-card-badge">IRAS · Singapore</div>
             <div class="member-card-name">${escapeHtml(m.name)}</div>
             ${renderPermitStatusLine(m)}
@@ -1582,22 +2195,22 @@
       ).join('');
       return `
         <div class="member-row">
-          <input type="text" value="${escapeHtml(m.name)}" id="memberName_${m.id}">
-          <input type="number" value="${m.birthYear || ''}" id="memberBirthYear_${m.id}" placeholder="Birth year" style="width: 110px;">
-          <label><input type="checkbox" id="memberLhdn_${m.id}" ${t.lhdn ? 'checked' : ''}> LHDN</label>
-          <label><input type="checkbox" id="memberIras_${m.id}" ${t.iras ? 'checked' : ''}> IRAS</label>
-          <button class="btn btn-secondary" data-action="save-member-edits" data-id="${m.id}">Save</button>
-          <button class="icon-btn delete" title="Delete Member" data-action="delete-member-entirely" data-id="${m.id}">
+          <input type="text" value="${escapeHtml(m.name)}" id="memberName_${safeId(m.id)}">
+          <input type="number" value="${m.birthYear ? fmtYear(m.birthYear) : ''}" id="memberBirthYear_${safeId(m.id)}" placeholder="Birth year" style="width: 110px;">
+          <label><input type="checkbox" id="memberLhdn_${safeId(m.id)}" ${t.lhdn ? 'checked' : ''}> LHDN</label>
+          <label><input type="checkbox" id="memberIras_${safeId(m.id)}" ${t.iras ? 'checked' : ''}> IRAS</label>
+          <button class="btn btn-secondary" data-action="save-member-edits" data-id="${safeId(m.id)}">Save</button>
+          <button class="icon-btn delete" title="Delete Member" data-action="delete-member-entirely" data-id="${safeId(m.id)}">
             <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor">
               <path stroke-linecap="round" stroke-linejoin="round" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
             </svg>
           </button>
           <div class="member-row-permit">
             <label>🇸🇬 Permit
-              <select id="memberPermitStatus_${m.id}">${permitOptions}</select>
+              <select id="memberPermitStatus_${safeId(m.id)}">${permitOptions}</select>
             </label>
-            <label>From <input type="date" id="memberPermitFrom_${m.id}" value="${m.permitFrom || ''}"></label>
-            <label>Till <input type="date" id="memberPermitTill_${m.id}" value="${m.permitTill || ''}"></label>
+            <label>From <input type="date" id="memberPermitFrom_${safeId(m.id)}" value="${escapeHtml(m.permitFrom || '')}"></label>
+            <label>Till <input type="date" id="memberPermitTill_${safeId(m.id)}" value="${escapeHtml(m.permitTill || '')}"></label>
           </div>
         </div>
       `;
@@ -1688,7 +2301,7 @@
       return;
     }
     const memberSelect = document.getElementById('quickAddMember');
-    memberSelect.innerHTML = members.map(m => `<option value="${m.id}">${escapeHtml(m.name)}</option>`).join('');
+    memberSelect.innerHTML = members.map(m => `<option value="${safeId(m.id)}">${escapeHtml(m.name)}</option>`).join('');
     await updateQuickAddTypeOptions();
     document.getElementById('quickAddModal').classList.add('open');
     pushNavLayer('quickAddModal');
@@ -1809,7 +2422,14 @@
       record.id = parseInt(recordId, 10);
     }
 
-    await saveRecordToDB(record);
+    try {
+      await saveRecordToDB(record);
+    } catch (err) {
+      if (err && err.isStale) return;           // the lock screen already explains it
+      if (err) err.__reported = true;
+      alert(describeDbError(err));
+      return;                                   // keep what was typed so nothing is lost
+    }
     resetForm();
     await refreshApp();
   });
@@ -1850,7 +2470,14 @@
       irasRecord.id = parseInt(irasRecordId, 10);
     }
 
-    await saveIrasRecordToDB(irasRecord);
+    try {
+      await saveIrasRecordToDB(irasRecord);
+    } catch (err) {
+      if (err && err.isStale) return;
+      if (err) err.__reported = true;
+      alert(describeDbError(err));
+      return;
+    }
     resetIrasForm();
     await refreshApp();
   });
@@ -2004,22 +2631,22 @@
       const hasIncomeAdj = (r.lhdnAdjustedIncome !== null && r.lhdnAdjustedIncome !== undefined);
       const hasTaxAdj = (r.lhdnAdjustedTax !== null && r.lhdnAdjustedTax !== undefined);
       const hasLhdn = hasIncomeAdj || hasTaxAdj;
-      const lhdnYearStr = r.lhdnYear ? ` (Year ${r.lhdnYear})` : '';
+      const lhdnYearStr = r.lhdnYear ? ` (Year ${fmtYear(r.lhdnYear)})` : '';
       const lhdnBadge = `<span class="badge badge-lhdn">LHDN Adj${lhdnYearStr}</span>`;
 
       const sourcesList = r.sources.length > 0
         ? r.sources.map(s => `<div><strong>${escapeHtml(s.name)}:</strong> ${formatCurrency(s.amount, 'MYR')}</div>`).join('')
         : '';
       const attachmentsHtml = (Array.isArray(r.attachments) && r.attachments.length > 0)
-        ? r.attachments.map((att, i) => `<div class="attachment-chip-inline no-print"><button type="button" class="attachment-link-btn" data-action="open-record-attachment" data-kind="lhdn" data-id="${r.id}" data-idx="${i}">📎 <small>${escapeHtml(att.name || 'attachment')}</small></button></div>`).join('')
+        ? r.attachments.map((att, i) => `<div class="attachment-chip-inline no-print"><button type="button" class="attachment-link-btn" data-action="open-record-attachment" data-kind="lhdn" data-id="${safeId(r.id)}" data-idx="${i}">📎 <small>${escapeHtml(att.name || 'attachment')}</small></button></div>`).join('')
         : '';
       const sourcesCell = [sourcesList, hasLhdn ? lhdnBadge : '', attachmentsHtml].filter(Boolean).join('<br>')
         || '<span style="color: var(--text-muted);">-</span>';
 
       const hasYearSubmit = (r.yearSubmit !== null && r.yearSubmit !== undefined && !isNaN(r.yearSubmit));
       const hasTahunTaksiran = (r.tahunTaksiran !== null && r.tahunTaksiran !== undefined && !isNaN(r.tahunTaksiran));
-      const submitLine = hasYearSubmit ? `Submit: ${r.yearSubmit}` : '';
-      const yaBadge = hasTahunTaksiran ? `<span class="badge">YA ${r.tahunTaksiran}</span>` : '';
+      const submitLine = hasYearSubmit ? `Submit: ${fmtYear(r.yearSubmit)}` : '';
+      const yaBadge = hasTahunTaksiran ? `<span class="badge">YA ${fmtYear(r.tahunTaksiran)}</span>` : '';
       const submitYaCell = [submitLine, yaBadge].filter(Boolean).join('<br>')
         || '<span style="color: var(--text-muted);">-</span>';
 
@@ -2040,11 +2667,11 @@
         ? `<br><small style="color: var(--warning); font-weight: 600;">${diffLabel} by ${formatCurrency(Math.abs(r.incomeVsSourceDiff), 'MYR')}</small>`
         : '';
 
-      const ageStr = currentMemberBirthYear ? `<br><small style="color: var(--text-muted);">Age: ${r.yearWorking - currentMemberBirthYear}</small>` : '';
+      const ageStr = (currentMemberBirthYear && r.yearWorking > 0) ? `<br><small style="color: var(--text-muted);">Age: ${Math.trunc(r.yearWorking - currentMemberBirthYear)}</small>` : '';
 
       return `
         <tr>
-          <td><strong>${r.yearWorking}</strong>${ageStr}</td>
+          <td><strong>${fmtYear(r.yearWorking)}</strong>${ageStr}</td>
           <td>${submitYaCell}</td>
           <td>${sourcesCell}</td>
           <td><strong>${formatCurrency(r.totalDerivedIncome, 'MYR')}</strong></td>
@@ -2052,12 +2679,12 @@
           <td style="color: var(--danger);">${taxAmountStr}</td>
           <td style="color: var(--success); font-weight: bold;">${formatCurrency(effectiveNet, 'MYR')}</td>
           <td class="no-print">
-            <button class="icon-btn edit" title="Edit Record" data-action="edit-record" data-id="${r.id}">
+            <button class="icon-btn edit" title="Edit Record" data-action="edit-record" data-id="${safeId(r.id)}">
               <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                 <path stroke-linecap="round" stroke-linejoin="round" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
               </svg>
             </button>
-            <button class="icon-btn delete" title="Delete Record" data-action="delete-record" data-id="${r.id}">
+            <button class="icon-btn delete" title="Delete Record" data-action="delete-record" data-id="${safeId(r.id)}">
               <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                 <path stroke-linecap="round" stroke-linejoin="round" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
               </svg>
@@ -2108,7 +2735,7 @@
         ? `${years[0]}`
         : `${years[0]} - ${years[years.length - 1]}`;
 
-      const annualBreakdown = years.map(y => `<div><strong>${y}:</strong> ${formatCurrency(data.years[y], 'MYR')}</div>`).join('');
+      const annualBreakdown = years.map(y => `<div><strong>${fmtYear(y)}:</strong> ${formatCurrency(data.years[y], 'MYR')}</div>`).join('');
 
       return `
         <tr>
@@ -2139,7 +2766,7 @@
         ? `${years[0]}`
         : `${years[0]} - ${years[years.length - 1]}`;
 
-      const annualBreakdown = years.map(y => `<div><strong>${y}:</strong> ${formatCurrency(data.years[y], 'MYR')}</div>`).join('');
+      const annualBreakdown = years.map(y => `<div><strong>${fmtYear(y)}:</strong> ${formatCurrency(data.years[y], 'MYR')}</div>`).join('');
 
       // Long-spanning companies get a wider card and a multi-column
       // breakdown instead of one long vertical list of years.
@@ -2173,9 +2800,9 @@
     }
 
     irasTableBody.innerHTML = irasRecords.map(r => {
-      const yearSubmitStr = (r.yearSubmit !== null && r.yearSubmit !== undefined && !isNaN(r.yearSubmit)) ? r.yearSubmit : '-';
+      const yearSubmitStr = fmtYear(r.yearSubmit);
       const attachmentsHtml = (Array.isArray(r.attachments) && r.attachments.length > 0)
-        ? r.attachments.map((att, i) => `<div class="attachment-chip-inline no-print"><button type="button" class="attachment-link-btn" data-action="open-record-attachment" data-kind="iras" data-id="${r.id}" data-idx="${i}">📎 <small>${escapeHtml(att.name || 'attachment')}</small></button></div>`).join('')
+        ? r.attachments.map((att, i) => `<div class="attachment-chip-inline no-print"><button type="button" class="attachment-link-btn" data-action="open-record-attachment" data-kind="iras" data-id="${safeId(r.id)}" data-idx="${i}">📎 <small>${escapeHtml(att.name || 'attachment')}</small></button></div>`).join('')
         : '';
       const noaStr = (r.noa ? `<span class="badge badge-iras">${escapeHtml(r.noa)}</span>` : '<span style="color: var(--text-muted);">-</span>') + (renderNoteHtml(r.note) ? '<br>' + renderNoteHtml(r.note) : '') + (attachmentsHtml ? '<br>' + attachmentsHtml : '');
       const noaIncomeStr = (r.noaIncome !== null && r.noaIncome !== undefined) ? formatCurrency(r.noaIncome, 'SGD') : '-';
@@ -2184,23 +2811,23 @@
       const netIncomeStr = (r.noaIncome !== null && r.noaIncome !== undefined) || (r.taxPayment !== null && r.taxPayment !== undefined)
         ? formatCurrency(netIncome, 'SGD') : '-';
 
-      const ageStr = currentMemberBirthYear ? `<br><small style="color: var(--text-muted);">Age: ${r.yearWorking - currentMemberBirthYear}</small>` : '';
+      const ageStr = (currentMemberBirthYear && r.yearWorking > 0) ? `<br><small style="color: var(--text-muted);">Age: ${Math.trunc(r.yearWorking - currentMemberBirthYear)}</small>` : '';
 
       return `
         <tr>
-          <td><strong>${r.yearWorking}</strong>${ageStr}</td>
+          <td><strong>${fmtYear(r.yearWorking)}</strong>${ageStr}</td>
           <td>${yearSubmitStr}</td>
           <td>${noaStr}</td>
           <td>${noaIncomeStr}</td>
           <td style="color: var(--iras-red); font-weight: bold;">${taxPaymentStr}</td>
           <td style="color: var(--success); font-weight: bold;">${netIncomeStr}</td>
           <td class="no-print">
-            <button class="icon-btn edit" title="Edit IRAS Record" data-action="edit-iras-record" data-id="${r.id}">
+            <button class="icon-btn edit" title="Edit IRAS Record" data-action="edit-iras-record" data-id="${safeId(r.id)}">
               <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                 <path stroke-linecap="round" stroke-linejoin="round" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
               </svg>
             </button>
-            <button class="icon-btn delete" title="Delete IRAS Record" data-action="delete-iras-record" data-id="${r.id}">
+            <button class="icon-btn delete" title="Delete IRAS Record" data-action="delete-iras-record" data-id="${safeId(r.id)}">
               <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                 <path stroke-linecap="round" stroke-linejoin="round" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
               </svg>
