@@ -847,13 +847,13 @@
   pdf.js is loaded here (rather than left to app.js) so pdfjsLib exists
   before app.js needs it.
 
-  Vendored locally at ./lib/pdf.min.mjs (pdfjs-dist 6.4.299 LEGACY build, pulled from
+  Vendored locally at ./lib/pdfjs-6.4.299/pdf.min.mjs (pdfjs-dist 6.4.299 LEGACY build, pulled from
   the official npm registry — Mozilla's own publish of pdf.js — rather
   than a CDN edge copy). Same-origin 'self' scripts aren't subject to
   SRI in the first place, so there's no integrity= hash to keep in sync
   here. Trust is anchored once, at vendoring time (see README for how to
   update this file, and for a documentation-only SHA-256 of both
-  ./lib/*.mjs files to check against if you ever want to confirm they
+  ./lib/pdfjs-*/*.mjs files to check against if you ever want to confirm they
   weren't altered post-vendoring). v16: 6.2.108 → 6.4.299, legacy build
   (the modern build needs Chrome 145+ features and fails to open PDFs in
   older browsers). This app's CSP (script-src 'self', no 'unsafe-eval')
@@ -870,9 +870,13 @@
   actually opened (see app.js), by which time the user has already
   interacted with the page.
 
-  ./lib/pdf.worker.min.mjs (configured in app.js) is the matching
-  worker build from the same package — keep all three files' versions
-  in lockstep when updating. pdf.js loads this worker as an ES module
+  ./lib/pdfjs-6.4.299/pdf.worker.min.mjs (its URL is set by pdf-loader.mjs
+  and read in app.js) is the matching worker build from the same package —
+  keep all three files' versions in lockstep when updating. v17: that is now
+  enforced by the folder name (PDFJS_DIR in lib/pdf-loader.mjs), and the
+  folder also holds wasm/ (image decoders for scanner PDFs; the CSP does not
+  allow compiling WebAssembly, so the plain-JS *_nowasm_fallback.js are what
+  runs — the CSP itself is unchanged). pdf.js loads this worker as an ES module
   worker itself (new Worker(src, {type: "module"})), which is why
   worker-src stays 'self' with no other CSP change needed.
 -->

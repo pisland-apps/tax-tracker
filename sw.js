@@ -9,7 +9,7 @@
 // label shown in the bottom-right version badge) on purpose — they live
 // in different files and don't sync automatically, so bump BOTH to the
 // same number by hand on every deploy that touches app.js or index.html.
-const CACHE_VERSION = 16;
+const CACHE_VERSION = 17;
 const CACHE_NAME = `tax-tracker-cache-v${CACHE_VERSION}`;
 
 // './index.html' is deliberately NOT listed: Cloudflare Pages redirects /index.html to /, and
@@ -21,14 +21,28 @@ const APP_SHELL = [
   './icons/icon-192.png',
   './icons/icon-512.png',
   './lib/pdf-loader.mjs',
-  './lib/pdf.min.mjs',
-  './lib/pdf.worker.min.mjs'
+  // v17: pdf.js lives in a version-named folder (PDFJS_DIR in lib/pdf-loader.mjs)
+  // so its main file, worker and decoders can only come from the same release.
+  // Keep these lines and PDFJS_DIR in step when pdf.js is updated.
+  './lib/pdfjs-6.4.299/pdf.min.mjs',
+  './lib/pdfjs-6.4.299/pdf.worker.min.mjs',
+  // Image decoders for scanner PDFs. The CSP does not allow compiling
+  // WebAssembly, so pdf.js uses the *_nowasm_fallback.js; the .wasm files are
+  // kept with them (they are used if the CSP ever gains 'wasm-unsafe-eval').
+  // All must work offline.
+  './lib/pdfjs-6.4.299/wasm/jbig2.wasm',
+  './lib/pdfjs-6.4.299/wasm/openjpeg.wasm',
+  './lib/pdfjs-6.4.299/wasm/qcms_bg.wasm',
+  './lib/pdfjs-6.4.299/wasm/jbig2_nowasm_fallback.js',
+  './lib/pdfjs-6.4.299/wasm/openjpeg_nowasm_fallback.js'
 ];
 
 self.addEventListener('install', (event) => {
   self.skipWaiting();
   event.waitUntil(
-    caches.open(CACHE_NAME).then((cache) => cache.addAll(APP_SHELL))
+    // v17: cache:"reload" so the pre-cache never copies a stale file out of the
+    // browser's own HTTP cache, which could precache a half-old, half-new set.
+    caches.open(CACHE_NAME).then((cache) => cache.addAll(APP_SHELL.map((url) => new Request(url, { cache: 'reload' }))))
   );
 });
 

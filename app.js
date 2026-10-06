@@ -13,15 +13,16 @@
   // Service Worker/cache in devtools — it means the browser is still
   // running an old cached build, not that the deploy failed.
   // ============================================================
-  const APP_VERSION = 'v16';
-  const APP_VERSION_DATE = '2026-10-04';
+  const APP_VERSION = 'v17';
+  const APP_VERSION_DATE = '2026-10-05';
 
   (function initVersionBadge() {
     const el = document.getElementById('versionBadge');
     if (el) el.textContent = `${APP_VERSION} · ${APP_VERSION_DATE}`;
   })();
 
-  // pdf.js — vendored locally at ./lib/pdf.min.mjs + ./lib/pdf.worker.min.mjs
+  // pdf.js — vendored locally in ./lib/pdfjs-6.4.299/ (pdf.min.mjs +
+  // pdf.worker.min.mjs + wasm/, the LEGACY build)
   // (loaded via the ./lib/pdf-loader.mjs module shim in index.html, which
   // assigns the import to window.pdfjsLib). Used by the in-app attachment
   // viewer to render PDFs onto <canvas> instead of relying on the browser's
@@ -37,9 +38,50 @@
   function ensurePdfWorkerConfigured() {
     if (!window.pdfjsLib) return false;
     if (!pdfjsLib.GlobalWorkerOptions.workerSrc) {
-      pdfjsLib.GlobalWorkerOptions.workerSrc = 'lib/pdf.worker.min.mjs';
+      // v17: the worker URL comes from pdf-loader.mjs (version-named folder).
+      pdfjsLib.GlobalWorkerOptions.workerSrc = window.PDFJS_WORKER_SRC || 'lib/pdfjs-6.4.299/pdf.worker.min.mjs';
     }
     return true;
+  }
+
+  // v17: the one place that opens a PDF with pdf.js. Returns the loading task
+  // (the caller keeps it so closing the viewer can destroy it) and a promise
+  // for the document that gives up after 30 s.
+  // - isEvalSupported: false — defense-in-depth against CVE-2024-4367-class bugs.
+  // - wasmUrl: since pdf.js 5 the image decoders for scanner PDFs (1-bit CCITT /
+  //   JBIG2) and JPEG2000 live in lib/pdfjs-<version>/wasm/. Without it those
+  //   pages render blank ("JBig2 failed to initialize"). This app's CSP
+  //   (script-src 'self', no 'wasm-unsafe-eval', also sent as an HTTP header by
+  //   _headers, which binds pdf.js's worker too) does not let the worker
+  //   compile the .wasm files, so pdf.js loads the plain-JavaScript
+  //   *_nowasm_fallback.js from the same folder instead ('self' allows that).
+  //   Both kinds of file are shipped; the CSP is unchanged.
+  // - canvasMaxAreaInBytes: a 600 dpi scanner page is one ~28-megapixel 1-bit
+  //   image. By default pdf.js GUESSES the largest canvas this browser can
+  //   make; when that guess or the allocation fails (memory / GPU pressure, so
+  //   only SOMETIMES) the page stays blank ("transferToImageBitmap ...
+  //   ImageBitmap construction failed"). A fixed 32 MiB limit (~8.4 Mpx) makes
+  //   pdf.js shrink such images first, every time (~3300 px wide is still far
+  //   more than the viewer shows).
+  // - 30 s timeout on opening the document: if the worker never answers (e.g.
+  //   main file and worker out of step) show a clear message instead of
+  //   leaving "Loading…" forever.
+  function startPdfDocument(bytes) {
+    const task = pdfjsLib.getDocument({
+      data: bytes,
+      isEvalSupported: false,
+      wasmUrl: window.PDFJS_WASM_URL,
+      canvasMaxAreaInBytes: 32 * 1024 * 1024
+    });
+    let timer;
+    const timeout = new Promise((_, reject) => {
+      timer = setTimeout(() => {
+        try { task.destroy(); } catch (e) { /* ignore */ }
+        reject(new Error('the PDF viewer did not respond (close and reopen the app once, then try again)'));
+      }, 30000);
+    });
+    const promise = Promise.race([task.promise, timeout]).finally(() => clearTimeout(timer));
+    return { task, promise };
   }
 
   // ============================================================
@@ -1221,9 +1263,9 @@
           return;
         }
         const bytes = dataURLtoUint8Array(att.data);
-        const task = pdfjsLib.getDocument({ data: bytes, isEvalSupported: false });
+        const { task, promise: pdfPromise } = startPdfDocument(bytes);
         avPdfTask = task;
-        const pdf = await task.promise;
+        const pdf = await pdfPromise;
         if (session !== avSession) return;
         content.innerHTML = '';
         const containerWidth = content.clientWidth || 700;

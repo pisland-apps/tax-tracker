@@ -27,9 +27,11 @@ sw.js                 <- service worker (offline caching); CACHE_VERSION lives h
 _headers              <- real HTTP security headers (Cloudflare Pages only, see below)
 icons/                <- icon-192.png, icon-512.png
 lib/
-  pdf-loader.mjs     <- small module shim: exposes pdf.js as window.pdfjsLib
-  pdf.min.mjs        <- pdf.js (vendored, see the deploy checklist)
-  pdf.worker.min.mjs <- pdf.js worker (vendored)
+  pdf-loader.mjs     <- small module shim: exposes pdf.js as window.pdfjsLib (and holds PDFJS_DIR)
+  pdfjs-6.4.299/     <- pdf.js, vendored in a version-named folder (v17), see the deploy checklist
+    pdf.min.mjs        (legacy build)
+    pdf.worker.min.mjs (worker, same release)
+    wasm/              (image decoders for scanner PDFs: .wasm + plain-JS *_nowasm_fallback.js)
 ```
 
 `index.html`, `app.js`, `manifest.json`, `sw.js`, `_headers`, `icons/` and `lib/` sit at the repo root
@@ -112,37 +114,53 @@ Every time `app.js`, `index.html`, `manifest.json` or any cached file changes, b
    that's a signal to hard-refresh (Ctrl/Cmd+Shift+R) or clear the site's
    Service Worker/cache in devtools — not that the deploy failed.
 4. pdf.js (used for the in-app attachment viewer) is vendored locally at
-   `./lib/pdf.min.mjs` and `./lib/pdf.worker.min.mjs` — not loaded from a
-   CDN, so there's no `integrity=` hash to maintain and the CSP's
-   `script-src`/`worker-src` stay `'self'`-only.
+   `./lib/pdfjs-6.4.299/` (`pdf.min.mjs`, `pdf.worker.min.mjs` and a `wasm/`
+   folder) — not loaded from a CDN, so there's no `integrity=` hash to maintain
+   and the CSP's `script-src`/`worker-src` stay `'self'`-only.
 
    Note: pdfjs-dist stopped shipping a classic/UMD build from v4.0.0
    onward (it's ESM-only now), so there's a third small file,
    `./lib/pdf-loader.mjs` — a module shim that imports `pdf.min.mjs` and
    assigns it to `window.pdfjsLib`, so `app.js` (a classic script) can
-   keep reading a plain global the same way it always did. You don't
-   need to touch `pdf-loader.mjs` when updating pdf.js versions, only
-   the two vendored library files.
+   keep reading a plain global the same way it always did.
+
+   **Since v17 the pdf.js files live in a folder named after the version**
+   (`lib/pdfjs-6.4.299/`) and `pdf-loader.mjs` builds every path (main file,
+   worker, `wasm/` decoders) from one constant, `PDFJS_DIR`. The main file and
+   the worker must be the same release (an old main file with a new worker
+   hangs on "Loading…"), and with fixed file names a cache can hand out one old
+   and one new file during an update; different releases now have different
+   paths, so that cannot happen. **Never overwrite files in an existing
+   versioned folder.**
 
    To update pdf.js to a newer version:
    ```
    npm pack pdfjs-dist@<version>
    tar xzf pdfjs-dist-<version>.tgz
-   cp package/legacy/build/pdf.min.mjs package/legacy/build/pdf.worker.min.mjs ./lib/
+   mkdir -p lib/pdfjs-<version>/wasm
+   cp package/legacy/build/pdf.min.mjs package/legacy/build/pdf.worker.min.mjs lib/pdfjs-<version>/
+   cp package/wasm/* lib/pdfjs-<version>/wasm/      # then delete quickjs-eval.js and quickjs-eval.wasm (not needed)
    ```
+   Then change `PDFJS_DIR` in `lib/pdf-loader.mjs` and the `./lib/pdfjs-…` lines
+   in `APP_SHELL` in `sw.js` (7 lines: 2 library files + 5 decoder files), and
+   delete the old `lib/pdfjs-<old version>/` folder. Keep the **whole** `wasm/`
+   folder, including the `*_nowasm_fallback.js` files: this app's CSP does not
+   allow compiling WebAssembly, so those JavaScript copies are what actually
+   decodes scanner PDFs (see v17 in the update log).
    Use the **`legacy/build`** files, not `build/`: the modern build needs a very
    new browser feature (`Map.prototype.getOrInsertComputed`, Chrome 145 and
    later) and shows "Could not preview this file" in older browsers, including
    many phones; the legacy build carries its own fallbacks and also works in
    current browsers. Pull from the official npm package (not a random CDN/GitHub mirror),
-   keep `pdf.min.mjs` and `pdf.worker.min.mjs` on the *same* version, add
-   any new/renamed files to `APP_SHELL` in `sw.js`, and bump
+   keep `pdf.min.mjs` and `pdf.worker.min.mjs` on the *same* version (the
+   folder name enforces it), add any new/renamed files to `APP_SHELL` in
+   `sw.js`, and bump
    `CACHE_VERSION`/`APP_VERSION` per steps 1–2 above so the new files get
    picked up by returning visitors. **Also update the checksums below**
    — recompute with:
    ```
-   openssl dgst -sha256 lib/pdf.min.mjs
-   openssl dgst -sha256 lib/pdf.worker.min.mjs
+   openssl dgst -sha256 lib/pdfjs-6.4.299/pdf.min.mjs
+   openssl dgst -sha256 lib/pdfjs-6.4.299/pdf.worker.min.mjs
    openssl dgst -sha256 lib/pdf-loader.mjs
    ```
    These are a documentation-only record for verifying the vendored
@@ -152,15 +170,20 @@ Every time `app.js`, `index.html`, `manifest.json` or any cached file changes, b
    break silently on a stale/mismatched hash with no upside, since same
    origin has nothing external to protect against). Current pdfjs-dist
    version: **6.4.299, legacy build** (v16; up from 6.2.108, which was already
-   the fixed version for CVE-2026-16633). `getDocument` is called with
-   `isEvalSupported: false` and the viewer destroys the loading task when a
-   PDF is closed. Retest PDF viewing after every pdf.js update.
+   the fixed version for CVE-2026-16633). `getDocument` is called (in one place,
+   `startPdfDocument()` in `app.js`) with `isEvalSupported: false`, `wasmUrl`,
+   `canvasMaxAreaInBytes: 32 MiB` and a 30-second give-up timer, and the viewer
+   destroys the loading task when a PDF is closed. Retest PDF viewing after
+   every pdf.js update — with an ordinary PDF **and** a scanner PDF.
 
    | File | SHA-256 |
    |---|---|
-   | `lib/pdf.min.mjs` | `bccc24ea711db8e44503629519904a5292d73b9daaa214bbe7cdcc282b0f4259` |
-   | `lib/pdf.worker.min.mjs` | `145d2dd3ab0c86151011dba95acfa2d5336e2accd59388ea43dbee0efddaaec6` |
-   | `lib/pdf-loader.mjs` | `c578398411d31ea81a7649351379c68d79a4052de7579240d2e6c62ce220f860` |
+   | `lib/pdfjs-6.4.299/pdf.min.mjs` | `bccc24ea711db8e44503629519904a5292d73b9daaa214bbe7cdcc282b0f4259` |
+   | `lib/pdfjs-6.4.299/pdf.worker.min.mjs` | `145d2dd3ab0c86151011dba95acfa2d5336e2accd59388ea43dbee0efddaaec6` |
+   | `lib/pdf-loader.mjs` | `aa639cbadc312140e26d92ac6d7521b011bfbd56abd299d9c922de4f20bd7529` |
+
+   (The two pdf.js files are byte-for-byte the v16 files, only moved. The `wasm/` files come
+   from the same pdfjs-dist 6.4.299 package and are not listed.)
 
 ## Service worker and redirects
 
@@ -209,6 +232,7 @@ a database that already has others.
 
 ## Update log
 
+- **v17** — **Scanner PDFs no longer show blank pages; pdf.js files moved into a version-named folder.** PDFs saved by a flat-bed scanner (for example EPSON Scan: 1-bit black-and-white pages, CCITT / JBIG2) and PDFs with JPEG 2000 images could show blank pages in the attachment viewer: since pdf.js 5 their decoders are WebAssembly files that must be passed to `getDocument()` as `wasmUrl`, and this app never did (the console says "JBig2 failed to initialize"). New `lib/pdfjs-6.4.299/wasm/` holds `jbig2.wasm`, `openjpeg.wasm`, `qcms_bg.wasm` and the plain-JavaScript `jbig2_nowasm_fallback.js` / `openjpeg_nowasm_fallback.js` (plus licences), and `getDocument()` now gets `wasmUrl`. **The CSP and `_headers` are unchanged:** `script-src 'self'` does not allow compiling WebAssembly (and a CSP sent as an HTTP header also binds pdf.js's worker), so pdf.js loads the JavaScript decoders from the same folder instead — which is why both kinds of file are shipped. Also: `canvasMaxAreaInBytes: 32 MiB`, because a 600 dpi scan page is one ~28-megapixel image and pdf.js's own guess of the largest canvas can fail under memory pressure (`transferToImageBitmap … ImageBitmap construction failed`), leaving that page blank only sometimes — larger images are now shrunk first; a 30-second timeout with a clear message instead of "Loading…" forever; one function, `startPdfDocument()`, opens PDFs. pdf.js moved to `lib/pdfjs-6.4.299/` with every path built from `PDFJS_DIR` in `lib/pdf-loader.mjs`, so the main file and the worker can never come from different releases (an old main file with a new worker hangs with "Unknown action from worker: test"; seen in the sibling app Ledger). The service worker's pre-cache now fetches with `cache: "reload"`. The pdf.js 6.4.299 legacy files themselves are unchanged. `CACHE_VERSION` 16 → 17, `APP_VERSION` `'v17'`. No change to stored data.
 - **v16** — Data-safety release after a full review (`tax-tracker-security-review` in the project notes). **Change Passcode** and **Import** are now all-or-nothing (everything is encrypted in memory first, then written in one database transaction). Import validates the whole file first (types, ranges, ids, attachments, sizes), shows what it contains, and a bad file changes nothing. A passcode change in one window locks other open windows (and a stale window can never write). Unreadable items are skipped with a warning instead of freezing the app. Database errors (for example a full device) are reported and the form keeps what you typed. Locking now closes the attachment viewer, empties the screen and clears passcode fields; the app also locks when it comes back after being hidden longer than the idle limit. Imported and stored values can no longer inject markup. Attachments are checked on upload, import and open (only PDF or image types keep their type; other files download as plain files). Backup export uses a Blob download. `iterations` read from a file or the vault is range-checked. **pdf.js 6.4.299 (legacy build)** with `isEvalSupported: false`; PDFs now open in browsers older than Chrome 145 too. COOP / CORP headers added in `_headers`. Persistent storage is requested. **The passcode minimum is unchanged: 6 characters (the numpad is kept).**
 - **v15** — Service worker and `start_url` hardened for Cloudflare Pages (see "Service worker and redirects"); README brought in line with the code (features, structure, stray line removed, this log).
 - **v14** — Big numpad on the set-passcode and unlock screens, with a switch back to the normal keyboard.
